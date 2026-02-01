@@ -50,16 +50,32 @@ const handleLogin = async () => {
       loading.value = true
       try {
         const res = await axios.post('http://127.0.0.1:8000/api/users/login/', form)
+
+        // 🟢 核心修复：根据后端实际返回结构解析数据
+        // 后端返回结构: { code: 200, data: { token: 'xxx', username: 'xxx' } }
         if (res.data.code === 200) {
-          localStorage.setItem('token', res.data.token)
-          localStorage.setItem('userInfo', JSON.stringify(res.data.userInfo))
-          ElMessage.success('登录成功')
-          router.push('/dashboard')
+          const responseData = res.data.data // 获取嵌套的 data 对象
+
+          if (responseData && responseData.token) {
+              localStorage.setItem('token', responseData.token)
+
+              // 构建用户信息对象
+              const userInfo = {
+                  username: responseData.username || form.username
+              }
+              localStorage.setItem('user', JSON.stringify(userInfo)) // 注意：MainLayout里读取的是 'user' 不是 'userInfo'
+
+              ElMessage.success('登录成功')
+              router.push('/dashboard')
+          } else {
+              ElMessage.error('登录异常：未获取到令牌')
+          }
         } else {
-          ElMessage.error(res.data.msg)
+          ElMessage.error(res.data.msg || '登录失败')
         }
       } catch (err) {
-        ElMessage.error('登录失败，请检查账号密码')
+        console.error(err)
+        ElMessage.error('登录请求失败，请检查网络或账号')
       } finally {
         loading.value = false
       }
@@ -93,7 +109,7 @@ const handleLogin = async () => {
 .w-100 { width: 100%; }
 .links {
   display: flex;
-  justify-content: center; /* 居中显示 */
+  justify-content: center;
   margin-top: 15px;
 }
 </style>

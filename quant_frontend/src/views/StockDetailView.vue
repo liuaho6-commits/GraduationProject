@@ -19,8 +19,8 @@
            </div>
 
            <el-radio-group v-model="viewMode" size="small" @change="handleViewChange">
-             <el-radio-button label="daily">日K</el-radio-button>
-             <el-radio-button label="min">分时</el-radio-button>
+             <el-radio-button value="min">分时</el-radio-button>
+             <el-radio-button value="daily">日K</el-radio-button>
            </el-radio-group>
          </div>
       </template>
@@ -28,14 +28,9 @@
 
     <div class="main-content">
       <div class="chart-wrapper" v-loading="loading">
-        <StockDailyChart
-          v-if="viewMode === 'daily'"
+        <StockChart
           :data="chartData"
-        />
-        <StockMinuteChart
-          v-if="viewMode === 'min'"
-          :data="chartData"
-          :pre-close="preClose"
+          :freq="viewMode"
         />
       </div>
 
@@ -54,16 +49,17 @@
             <el-form-item label="委托价格 (市价)">
                <el-input-number
                   v-model="tradePrice"
+                  :precision="2"
                   :step="0.01"
                   style="width: 100%"
                   :disabled="true"
                   :controls="false"
                />
-               <div class="price-hint">当前无挂单机制，以市价(买一/卖一)成交</div>
+               <div class="price-hint">当前市价: ¥{{ formatPrice(latestPrice) }} (实时变动)</div>
             </el-form-item>
 
             <el-form-item label="委托数量">
-               <el-input-number v-model="tradeVolume" :step="100" style="width: 100%" />
+               <el-input-number v-model="tradeVolume" :step="100" :min="100" step-strictly style="width: 100%" />
                <div class="quick-btns">
                  <el-button size="small" @click="setVolume(0.33)">1/3</el-button>
                  <el-button size="small" @click="setVolume(0.5)">1/2</el-button>
@@ -73,7 +69,7 @@
 
             <div class="asset-info">
                <div v-if="tradeDirection === 'buy'">
-                 <small>可用资金: ¥{{ userBalance.toLocaleString() }}</small>
+                 <small>可用资金: ¥{{ formatPrice(userBalance) }}</small>
                </div>
                <div v-else>
                  <small>持仓股数: {{ userPosition }}</small>
@@ -85,6 +81,7 @@
               class="trade-btn"
               :class="tradeDirection === 'buy' ? 'buy-btn' : 'sell-btn'"
               @click="handleTrade"
+              :loading="tradeLoading"
             >
               {{ tradeDirection === 'buy' ? '买入' : '卖出' }}
             </el-button>
@@ -96,48 +93,92 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { Clock } from '@element-plus/icons-vue'
-
-import StockDailyChart from '../components/StockDailyChart.vue'
-import StockMinuteChart from '../components/StockMinuteChart.vue'
+import StockChart from '../components/StockChart.vue'
 
 const route = useRoute()
 const router = useRouter()
 const stockCode = route.params.code
 
-const stockName = ref('')
+const stockName = ref('加载中...')
 const systemTimeDisplay = ref('')
 const chartData = ref([])
-const preClose = ref(0)
 const loading = ref(false)
-const viewMode = ref('daily')
+const viewMode = ref('min')
 
-// 交易相关
 const tradeDirection = ref('buy')
 const tradePrice = ref(0)
 const latestPrice = ref(0)
 const tradeVolume = ref(100)
 const userBalance = ref(0)
 const userPosition = ref(0)
+const tradeLoading = ref(false)
 
 let refreshTimer = null
-const api = axios.create({
-  baseURL: 'http://127.0.0.1:8000/',
-  headers: { 'Authorization': `Token ${localStorage.getItem('token')}` }
-})
 
-// 自动更新交易价格
-const updateTradePrice = () => {
-    if (latestPrice.value > 0) {
-        tradePrice.value = latestPrice.value
+const getApi = () => {
+  return axios.create({
+    baseURL: 'http://127.0.0.1:8000/',
+    headers: { 'Authorization': `Token ${localStorage.getItem('token')}` }
+  })
+}
+
+const formatPrice = (val) => {
+    return Number(val).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+}
+
+const fetchQuote = async () => {
+    const api = getApi()
+    try {
+        const res = await api.get(`stocks/api/data/${stockCode}/?freq=min`)
+        if (res.data.code === 200) {
+             const data = res.data.data
+             if (data && data.length > 0) {
+                 const newPrice = parseFloat(data[data.length - 1].close)
+                 latestPrice.value = newPrice
+                 tradePrice.value = parseFloat(newPrice.toFixed(2))
+             }
+             stockName.value = res.data.name
+             systemTimeDisplay.value = res.data.current_mock_time || ''
+        }
+    } catch (e) { console.error("Quote error", e) }
+}
+
+const fetchChartData = async () => {
+    if(!viewMode.value) return
+    loading.value = true
+    const api = getApi()
+    try {
+        const res = await api.get(`stocks/api/data/${stockCode}/?freq=${viewMode.value}`)
+        if (res.data.code === 200) {
+            chartData.value = res.data.data
+        }
+    } catch (err) {
+        console.error("Chart error", err)
+    } finally {
+        loading.value = false
     }
 }
 
-// 快捷仓位计算
+const fetchUserAssets = async () => {
+    const api = getApi()
+    try {
+        const userRes = await api.get('api/users/info/').catch(()=>null) || await api.get('users/api/info/')
+        if (userRes.data.code === 200) {
+            const data = userRes.data.data || userRes.data
+            userBalance.value = parseFloat(data.balance || 0)
+        }
+        const posRes = await api.get(`api/trade/position/${stockCode}/`)
+        if (posRes.data.code === 200) {
+            userPosition.value = posRes.data.data.volume || 0
+        }
+    } catch (e) { console.error(e) }
+}
+
 const setVolume = (ratio) => {
     if (tradePrice.value <= 0) return ElMessage.warning('当前价格无效')
 
@@ -151,49 +192,10 @@ const setVolume = (ratio) => {
     }
 }
 
-const fetchStockData = async (freq, date = null, silent = false) => {
-  if (!silent) loading.value = true
-  try {
-    let url = `stocks/api/data/${stockCode}/?freq=${freq}`
-    if (date) url += `&date=${date}`
-    const res = await api.get(url)
-
-    if (res.data.code === 200) {
-      stockName.value = res.data.name
-      systemTimeDisplay.value = res.data.current_mock_time || ''
-
-      const raw = res.data.data
-      chartData.value = raw
-
-      if (raw.length > 0) {
-          latestPrice.value = raw[raw.length - 1].close
-          updateTradePrice()
-      }
-
-      if (res.data.pre_close) preClose.value = parseFloat(res.data.pre_close)
-    }
-  } catch (err) {
-      if (!silent) console.error(err)
-  } finally {
-      if (!silent) loading.value = false
-  }
-}
-
-const fetchUserAssets = async () => {
-    try {
-        const userRes = await api.get('api/users/info/')
-        if (userRes.data.code === 200) {
-            userBalance.value = parseFloat(userRes.data.data.balance || 0)
-        }
-        const posRes = await api.get(`api/trade/position/${stockCode}/`)
-        if (posRes.data.code === 200) {
-            userPosition.value = posRes.data.data.volume || 0
-        }
-    } catch (e) { console.error(e) }
-}
-
 const handleTrade = async () => {
     if (tradeVolume.value <= 0) return ElMessage.warning('数量必须大于0')
+    tradeLoading.value = true
+    const api = getApi()
     try {
         const res = await api.post('api/trade/place_order/', {
             stock_code: stockCode,
@@ -205,28 +207,35 @@ const handleTrade = async () => {
             ElMessage.success('委托提交成功')
             fetchUserAssets()
         } else {
-            ElMessage.error(res.data.msg)
+            ElMessage.error(res.data.msg || '交易失败')
         }
     } catch (e) {
         ElMessage.error('交易请求失败')
+    } finally {
+        tradeLoading.value = false
     }
 }
 
-const handleViewChange = (val) => {
+const handleViewChange = () => {
     chartData.value = []
-    fetchStockData(val, null, false)
+    fetchChartData()
 }
 
 const goBack = () => router.push('/market')
 
-watch(tradeDirection, updateTradePrice)
-
 onMounted(() => {
-    fetchStockData(viewMode.value, null, false)
+    fetchQuote()
+    fetchChartData()
     fetchUserAssets()
     refreshTimer = setInterval(() => {
-        if (viewMode.value === 'min') fetchStockData('min', null, true)
-    }, 1000)
+        const api = getApi()
+        fetchQuote()
+        if (viewMode.value === 'min') {
+             api.get(`stocks/api/data/${stockCode}/?freq=min`).then(res => {
+                 if(res.data.code === 200) chartData.value = res.data.data
+             })
+        }
+    }, 2000)
 })
 
 onBeforeUnmount(() => {
@@ -244,13 +253,12 @@ onBeforeUnmount(() => {
 
 .main-content { display: flex; gap: 20px; align-items: flex-start; }
 
-/* 🟢 修改点：调整了高度，从 600px 减小到 450px */
 .chart-wrapper {
   flex: 1;
   background: #fff;
   border-radius: 8px;
   padding: 10px;
-  height: 450px; /* 之前是 600px */
+  height: 450px;
   min-height: 450px;
   box-shadow: 0 2px 12px 0 rgba(0,0,0,0.05);
 }

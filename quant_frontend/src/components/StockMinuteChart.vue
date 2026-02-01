@@ -1,214 +1,246 @@
 <template>
-  <div ref="chartContainer" className="chart-container"></div>
+  <div class="chart-wrapper">
+    <div ref="chartContainer" class="echart-box"></div>
+  </div>
 </template>
 
 <script setup>
-import {ref, onMounted, onBeforeUnmount, watch, nextTick} from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
-  data: {type: Array, default: () => []},
-  preClose: {type: Number, default: 0} // 🟢 接收昨收价
+  data: { type: Array, default: () => [] }
 })
 
 const chartContainer = ref(null)
 let myChart = null
-const isFirstRender = ref(true)
 
-const generateDefaultTimeline = () => {
-  const timeline = []
-  let h = 9, m = 30
-  for (let i = 0; i < 24; i++) {
-    timeline.push(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`)
-    m += 5
-    if (m >= 60) {
-      h++;
-      m = 0
-    }
-  }
-  h = 13;
-  m = 0
-  for (let i = 0; i < 24; i++) {
-    timeline.push(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`)
-    m += 5
-    if (m >= 60) {
-      h++;
-      m = 0
-    }
-  }
-  return timeline
+// 颜色配置
+const color = {
+  up: '#F56C6C',
+  down: '#00C853',
+  volUp: '#F56C6C',
+  volDown: '#00C853'
 }
 
 const render = () => {
   if (!chartContainer.value) return
-  if (!myChart) myChart = echarts.init(chartContainer.value)
+
+  // 1. 初始化
+  if (!myChart) {
+    myChart = echarts.init(chartContainer.value)
+    window.addEventListener('resize', () => myChart && myChart.resize())
+  }
 
   const rawData = props.data || []
-  const hasData = rawData.length > 0
-  const upColor = '#F56C6C';
-  const downColor = '#00C853'
-
-  let xAxisData = []
-  let kLineData = []
-  let volData = []
-
-  if (hasData) {
-    xAxisData = rawData.map(item => {
-      let t = item.date
-      if (t.includes(' ')) t = t.split(' ')[1]
-      else if (t.includes('T')) t = t.split('T')[1]
-      return t && t.length >= 5 ? t.substring(0, 5) : t
+  if (rawData.length === 0) {
+    myChart.setOption({
+      title: { text: '暂无数据', left: 'center', top: 'center', textStyle: { color: '#ccc' } },
+      grid: [], xAxis: [], yAxis: [], series: []
     })
-
-    const realK = rawData.map(item => [item.open, item.close, item.low, item.high])
-    const realV = rawData.map(item => item.volume)
-
-    const WINDOW_SIZE = 48
-    if (xAxisData.length < WINDOW_SIZE) {
-      const padCount = WINDOW_SIZE - xAxisData.length
-      const padX = new Array(padCount).fill('')
-      xAxisData = [...xAxisData, ...padX]
-      kLineData = realK
-      volData = realV
-    } else {
-      kLineData = realK
-      volData = realV
-    }
-  } else {
-    xAxisData = generateDefaultTimeline()
-    kLineData = []
-    volData = []
+    return
   }
 
-  const dataLen = xAxisData.length
-  let startValue = Math.max(0, dataLen - 50)
-  let endValue = dataLen - 1
+  // 2. 数据转换
+  const categoryData = []
+  const kData = []
+  const volData = []
 
-  if (!isFirstRender.value && hasData && myChart) {
-    const currentOpt = myChart.getOption()
-    if (currentOpt && currentOpt.dataZoom && currentOpt.dataZoom.length > 0) {
-      const dz = currentOpt.dataZoom[0]
-      const prevStart = dz.startValue
-      const prevEnd = dz.endValue
-
-      if (dz.end > 99) {
-        const span = prevEnd - prevStart
-        endValue = dataLen - 1
-        startValue = Math.max(0, endValue - span)
-      } else {
-        startValue = Math.min(prevStart, dataLen - 1)
-        endValue = Math.min(prevEnd, dataLen - 1)
+  rawData.forEach(item => {
+    // 格式化时间
+    let dateStr = item.date
+    if (dateStr && dateStr.length > 10) {
+      dateStr = dateStr.substring(5, 16)
+    }
+    categoryData.push(dateStr)
+    kData.push([item.open, item.close, item.low, item.high])
+    volData.push({
+      value: item.volume,
+      itemStyle: {
+        color: item.close >= item.open ? color.volUp : color.volDown
       }
+    })
+  })
+
+  // ==========================================
+  // 🟢 智能缩放锁定逻辑 (核心修复)
+  // ==========================================
+  const totalLen = categoryData.length
+  const DEFAULT_WINDOW_SIZE = 60 // 默认看60根
+
+  let finalStartValue = 0
+  let finalEndValue = totalLen - 1
+
+  // 检查是否是“第一次渲染”或者“无图表状态”
+  // 通过 getOption() 获取当前的缩放情况
+  const currentOpt = myChart.getOption()
+
+  // 默认策略：如果还没初始化，就锁定在最新
+  let shouldSnapToEnd = true
+  let currentWindowSize = DEFAULT_WINDOW_SIZE
+
+  if (currentOpt && currentOpt.dataZoom && currentOpt.dataZoom.length > 0) {
+    // 获取当前的 dataZoom 状态
+    const zoomState = currentOpt.dataZoom[0]
+
+    // 判断用户是否正在看“最右边”
+    // zoomState.end 是百分比 (0-100)。如果大于 98%，我们认为用户想跟随最新数据
+    if (zoomState.end != null && zoomState.end < 98) {
+      shouldSnapToEnd = false
+    }
+
+    // 计算用户当前的窗口大小 (看了多少根K线)
+    // 优先使用 startValue/endValue (索引)，比百分比更准
+    const sVal = zoomState.startValue
+    const eVal = zoomState.endValue
+
+    if (typeof sVal === 'number' && typeof eVal === 'number') {
+      currentWindowSize = eVal - sVal
+      if (currentWindowSize < 5) currentWindowSize = 5 // 最小保护
     }
   }
 
-  if (hasData) {
-    isFirstRender.value = false
+  // 计算新的 start/end
+  if (shouldSnapToEnd) {
+    // A. 锁定模式：永远显示最新的 N 根
+    finalEndValue = totalLen - 1
+    finalStartValue = Math.max(0, finalEndValue - currentWindowSize)
+  } else {
+    // B. 历史模式：保持索引不变 (用户在看历史，别乱动)
+    // 我们直接沿用之前的 startValue/endValue
+    // 注意：如果数据是追加的，索引不变意味着看到的还是那段历史时间，符合直觉
+    if (currentOpt && currentOpt.dataZoom && currentOpt.dataZoom[0]) {
+       finalStartValue = currentOpt.dataZoom[0].startValue
+       finalEndValue = currentOpt.dataZoom[0].endValue
+    }
   }
+
+  // ==========================================
 
   const option = {
-    animation: false,
-    title: {
-      show: !hasData,
-      text: '等待开盘数据...',
-      left: 'center', top: 'center',
-      textStyle: {color: '#ccc', fontSize: 14}
-    },
-    grid: [
-      {left: '50', right: '20', top: '20', height: '60%'},
-      {left: '50', right: '20', top: '68%', height: '16%'}
-    ],
+    animation: false, // 必须禁用动画，否则高频刷新会闪
     tooltip: {
-      trigger: 'axis', axisPointer: {type: 'cross'},
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(255, 255, 255, 0.95)',
+      borderWidth: 1,
+      borderColor: '#eee',
+      padding: 10,
+      textStyle: { color: '#333', fontSize: 12 },
       formatter: (params) => {
-        if (!params[0] || !params[0].value) return ''
-        const k = params[0]
-        if (!Array.isArray(k.value) || k.value.length < 2) return ''
+        const kParam = params.find(p => p.seriesName === 'K线')
+        if (!kParam) return ''
+        const i = kParam.dataIndex
+        const item = rawData[i]
+        if (!item) return ''
 
-        const open = k.value[1]
-        const currentClose = k.value[2]
-        const color = currentClose >= open ? upColor : downColor
-
-        // 🟢 修正计算：(当前价 - 昨收) / 昨收
-        // 这种方式是标准的证券涨跌幅计算
-        let chgPercent = 0
-        const basePrice = props.preClose
-
-        if (basePrice && basePrice !== 0) {
-          chgPercent = (currentClose - basePrice) / basePrice * 100
-        } else if (open !== 0) {
-          // 如果没有昨收价，兜底用当前K线开盘价（尽量避免这种情况）
-          chgPercent = (currentClose - open) / open * 100
+        let chgStr = '0.00%'
+        let prevClose = item.open
+        if (i > 0) prevClose = rawData[i - 1].close
+        if (prevClose !== 0) {
+          const chg = (item.close - prevClose) / prevClose * 100
+          chgStr = chg.toFixed(2) + '%'
         }
-
-        const chgColor = chgPercent >= 0 ? upColor : downColor
+        const isUp = parseFloat(chgStr) >= 0
 
         return `
-                <div style="font-weight:bold; margin-bottom:5px;">${k.axisValue}</div>
-                开盘: ${open}<br/>
-                最高: ${k.value[4]}<br/>
-                最低: ${k.value[3]}<br/>
-                收盘: <span style="color:${color}; font-weight:bold">${currentClose}</span><br/>
-                涨跌: <span style="color:${chgColor}">${chgPercent.toFixed(2)}%</span>
-            `
+          <div style="font-weight:bold; margin-bottom:5px;">${item.date.substring(5, 16)}</div>
+          开: ${item.open} <br/>
+          收: <span style="color:${item.close >= item.open ? color.up : color.down}">${item.close}</span> <br/>
+          高: ${item.high} <br/>
+          低: ${item.low} <br/>
+          幅: <span style="color:${isUp ? color.up : color.down}">${chgStr}</span> <br/>
+          量: ${item.volume}
+        `
+      },
+      position: function (pos, params, el, elRect, size) {
+         const obj = { top: 10 };
+         obj[['left', 'right'][+(pos[0] < size.viewSize[0] / 2)]] = 30;
+         return obj;
       }
     },
+    axisPointer: { link: { xAxisIndex: 'all' }, label: { backgroundColor: '#777' } },
+    grid: [
+      { left: '12%', right: '8%', top: '10%', height: '55%' },
+      { left: '12%', right: '8%', top: '75%', height: '15%' }
+    ],
     xAxis: [
       {
-        type: 'category', data: xAxisData, boundaryGap: false,
-        axisLine: {onZero: false},
-        axisLabel: {show: true, interval: 'auto'},
+        type: 'category',
+        data: categoryData,
+        scale: true,
+        boundaryGap: false,
+        axisLine: { onZero: false },
+        splitLine: { show: true, lineStyle: { type: 'dashed', opacity: 0.2 } },
+        axisLabel: { show: false },
         min: 'dataMin', max: 'dataMax'
       },
-      {type: 'category', gridIndex: 1, data: xAxisData, axisLabel: {show: false}}
+      {
+        type: 'category',
+        gridIndex: 1,
+        data: categoryData,
+        scale: true,
+        boundaryGap: false,
+        axisLine: { onZero: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { show: true, color: '#666', fontSize: 10 },
+        min: 'dataMin', max: 'dataMax'
+      }
     ],
     yAxis: [
-      {scale: true, splitLine: {show: true, lineStyle: {type: 'dashed'}}, axisLabel: {show: hasData}},
-      {scale: true, gridIndex: 1, splitLine: {show: false}, axisLabel: {show: false}}
+      { scale: true, splitLine: { show: true, lineStyle: { type: 'dashed', opacity: 0.2 } } },
+      { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, splitLine: { show: false } }
     ],
+    // 显式传入计算好的 startValue / endValue
     dataZoom: [
       {
-        type: 'inside', xAxisIndex: [0, 1],
-        startValue: startValue,
-        endValue: endValue
+        type: 'inside',
+        xAxisIndex: [0, 1],
+        startValue: finalStartValue,
+        endValue: finalEndValue,
+        rangeMode: ['value', 'value'] // 🟢 强制使用 value 模式，防止百分比漂移
       },
       {
-        show: true, type: 'slider', xAxisIndex: [0, 1],
-        top: '88%', height: 20, handleSize: '100%',
-        startValue: startValue,
-        endValue: endValue
+        show: true,
+        type: 'slider',
+        xAxisIndex: [0, 1],
+        top: '92%',
+        height: 20,
+        startValue: finalStartValue,
+        endValue: finalEndValue,
+        borderColor: 'transparent',
+        backgroundColor: '#f5f7fa',
+        handleStyle: { color: '#666' }
       }
     ],
     series: [
       {
-        name: 'K线', type: 'candlestick', data: kLineData,
-        itemStyle: {color: upColor, color0: downColor, borderColor: upColor, borderColor0: downColor}
+        name: 'K线',
+        type: 'candlestick',
+        data: kData,
+        itemStyle: { color: color.up, color0: color.down, borderColor: color.up, borderColor0: color.down }
       },
       {
-        name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volData,
-        itemStyle: {
-          color: (params) => {
-            const k = kLineData[params.dataIndex]
-            if (!k) return upColor
-            return (k[1] > k[0]) ? upColor : downColor
-          }
-        }
+        name: '成交量',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volData
       }
     ]
   }
 
-  myChart.setOption(option, true)
+  // 使用 false (merge模式)，但因为我们显式指定了 dataZoom，所以不会丢失位置
+  myChart.setOption(option, false)
 }
 
-// 🟢 监听 preClose 变化，确保异步获取的昨收价能更新图表
-watch([() => props.data, () => props.preClose], () => {
+watch(() => props.data, () => {
   nextTick(render)
-}, {deep: true})
+}, { deep: true })
 
 onMounted(() => {
-  isFirstRender.value = true
-  window.addEventListener('resize', () => myChart && myChart.resize())
-  setTimeout(render, 50)
+  nextTick(render)
 })
 
 onBeforeUnmount(() => {
@@ -217,8 +249,13 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.chart-container {
+.chart-wrapper {
   width: 100%;
-  height: 600px;
+  position: relative;
+  background: #fff;
+}
+.echart-box {
+  width: 100%;
+  height: 480px;
 }
 </style>

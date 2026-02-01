@@ -4,7 +4,7 @@
       <el-card shadow="hover" class="stat-card">
         <template #header><span class="card-title">总资产</span></template>
         <div class="card-value money" v-loading="loading">
-            ¥ {{ totalAssets.toLocaleString('en-US', {minimumFractionDigits: 2}) }}
+            ¥ {{ formatNumber(totalAssets) }}
         </div>
         <div class="card-footer">
           日收益: <span :class="dayProfit >= 0 ? 'up' : 'down'">
@@ -16,7 +16,7 @@
       <el-card shadow="hover" class="stat-card">
         <template #header><span class="card-title">可用余额</span></template>
         <div class="card-value" v-loading="loading">
-            ¥ {{ availableBalance.toLocaleString('en-US', {minimumFractionDigits: 2}) }}
+            ¥ {{ formatNumber(availableBalance) }}
         </div>
         <div class="card-footer">
           <el-button type="primary" link @click="openTransferDialog">银证转账</el-button>
@@ -69,7 +69,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="price" label="成交均价">
-            <template #default="scope">¥ {{ scope.row.price }}</template>
+            <template #default="scope">¥ {{ formatNumber(scope.row.price) }}</template>
           </el-table-column>
           <el-table-column prop="volume" label="成交数量" />
           <el-table-column prop="status" label="状态" width="100">
@@ -87,8 +87,8 @@
       <el-form label-position="top">
         <el-form-item label="操作类型">
           <el-radio-group v-model="transferType">
-            <el-radio-button label="deposit">转入 (充值)</el-radio-button>
-            <el-radio-button label="withdraw">转出 (提现)</el-radio-button>
+            <el-radio-button value="deposit">转入 (充值)</el-radio-button>
+            <el-radio-button value="withdraw">转出 (提现)</el-radio-button>
           </el-radio-group>
         </el-form-item>
 
@@ -97,7 +97,7 @@
              <template #prefix>¥</template>
            </el-input>
            <div class="balance-hint" v-if="transferType === 'withdraw'">
-             可转出余额: ¥ {{ availableBalance }}
+             可转出余额: ¥ {{ formatNumber(availableBalance) }}
            </div>
         </el-form-item>
       </el-form>
@@ -113,7 +113,7 @@
 import { ref, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
-import { useRouter } from 'vue-router' // 🟢 引入路由
+import { useRouter } from 'vue-router'
 import PerformanceChart from '../components/PerformanceChart.vue'
 
 const router = useRouter()
@@ -125,24 +125,30 @@ const totalReturn = ref(0)
 const activeStrategies = ref(0)
 const recentOrders = ref([])
 
-// 转账状态
 const transferDialogVisible = ref(false)
 const transferAmount = ref('')
-const transferType = ref('deposit') // deposit | withdraw
+const transferType = ref('deposit')
 
-const api = axios.create({
-    baseURL: 'http://127.0.0.1:8000/',
-    headers: { 'Authorization': `Token ${localStorage.getItem('token')}` }
-})
+// 动态获取 Token 的 API 实例
+const getApi = () => {
+    return axios.create({
+        baseURL: 'http://127.0.0.1:8000/',
+        headers: { 'Authorization': `Token ${localStorage.getItem('token')}` }
+    })
+}
 
 const formatTime = (timeStr) => {
     if (!timeStr) return '--'
     return timeStr.replace('T', ' ').split('.')[0]
 }
 
-// 🟢 跳转逻辑
+const formatNumber = (num) => {
+    if (num === undefined || num === null) return '0.00'
+    return Number(num).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+}
+
 const goToStock = (code) => {
-    if(code) router.push({ name: 'StockDetail', params: { code: code } })
+    if(code) router.push({ name: 'stock-detail', params: { code: code } })
 }
 
 const openTransferDialog = () => {
@@ -153,8 +159,8 @@ const openTransferDialog = () => {
 
 const fetchDashboardData = async () => {
     loading.value = true
+    const api = getApi()
     try {
-        // 1. 获取余额
         let userRes = await api.get('api/users/info/').catch(() => null)
         if (!userRes) userRes = await api.get('users/api/info/').catch(() => null)
 
@@ -164,7 +170,6 @@ const fetchDashboardData = async () => {
             totalAssets.value = parseFloat(data.total_assets || data.balance || 0)
         }
 
-        // 2. 获取收益率
         const perfRes = await api.get('trade/api/performance/?type=daily').catch(() => null)
         if (perfRes && perfRes.data.code === 200 && perfRes.data.data.length > 0) {
             const history = perfRes.data.data
@@ -173,20 +178,17 @@ const fetchDashboardData = async () => {
             totalReturn.value = lastDay.total_return_rate || 0
         }
 
-        // 3. 获取交易记录
         const ordersRes = await api.get('api/trade/orders/').catch(() => null)
         if (ordersRes && ordersRes.data.code === 200) {
             recentOrders.value = ordersRes.data.data || []
         }
-
     } catch (e) {
-        console.error("Dashboard fetch error", e)
+        if (e.response && e.response.status === 401) router.push('/login')
     } finally {
         loading.value = false
     }
 }
 
-// 🟢 处理转账
 const handleTransfer = async () => {
     const amount = parseFloat(transferAmount.value)
     if (!amount || amount <= 0) {
@@ -202,6 +204,7 @@ const handleTransfer = async () => {
     }
 
     try {
+        const api = getApi()
         const res = await api.post('trade/api/transfer/', { amount: finalAmount })
         if (res.data.code === 200) {
             ElMessage.success(transferType.value === 'deposit' ? '充值成功' : '提现成功')
@@ -233,8 +236,6 @@ onMounted(() => {
 .chart-section { margin-top: 20px; margin-bottom: 20px; }
 .table-section { margin-top: 20px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
-
-/* 🟢 新增样式 */
 .stock-link { color: #409EFF; cursor: pointer; font-weight: 500; }
 .stock-link:hover { text-decoration: underline; }
 .stock-code { color: #999; font-size: 12px; margin-left: 4px; }

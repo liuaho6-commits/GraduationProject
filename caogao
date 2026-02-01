@@ -1,0 +1,74 @@
+PS C:\Users\24624> Test-NetConnection -ComputerName 127.0.0.1 -Port 3306
+
+
+
+
+
+ComputerName     : 127.0.0.1
+
+RemoteAddress    : 127.0.0.1
+
+RemotePort       : 3306
+
+InterfaceAlias   : Loopback Pseudo-Interface 1
+
+SourceAddress    : 127.0.0.1
+
+TcpTestSucceeded : True
+
+liuhao@DESKTOP-8VI581B:/mnt/c/Users/24624$ ip addr | grep eth0
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc mq state UP group default qlen 1000
+    inet 192.168.182.65/24 brd 192.168.182.255 scope global noprefixroute eth0
+liuhao@DESKTOP-8VI581B:/mnt/c/Users/24624$
+
+liuhao@DESKTOP-8VI581B:~$ docker network inspect bridge
+[
+    {
+        "Name": "bridge",
+        "Id": "ad7adc0256b84fe46c2884820e2c042e1fa4d24d88bd3204983dc8516a3121ee",
+        "Created": "2026-01-10T08:44:51.942020501Z",
+        "Scope": "local",
+        "Driver": "bridge",
+        "EnableIPv4": true,
+        "EnableIPv6": false,
+        "IPAM": {
+            "Driver": "default",
+            "Options": null,
+            "Config": [
+                {
+                    "Subnet": "172.17.0.0/16",
+                    "IPRange": "",
+                    "Gateway": "172.17.0.1"
+                }
+            ]
+        },
+        "Internal": false,
+        "Attachable": false,
+        "Ingress": false,
+        "ConfigFrom": {
+            "Network": ""
+        },
+        "ConfigOnly": false,
+        "Options": {
+            "com.docker.network.bridge.default_bridge": "true",
+            "com.docker.network.bridge.enable_icc": "true",
+            "com.docker.network.bridge.enable_ip_masquerade": "true",
+            "com.docker.network.bridge.host_binding_ipv4": "0.0.0.0",
+            "com.docker.network.bridge.name": "docker0",
+            "com.docker.network.driver.mtu": "1500"
+        },
+        "Labels": {},
+        "Containers": {},
+        "Status": {
+            "IPAM": {
+                "Subnets": {
+                    "172.17.0.0/16": {
+                        "IPsInUse": 3,
+                        "DynamicIPsAvailable": 65533
+                    }
+                }
+            }
+        }
+    }
+]
+liuhao@DESKTOP-8VI581B:~$

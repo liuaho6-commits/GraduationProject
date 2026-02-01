@@ -28,7 +28,7 @@ class LoginView(APIView):
             return Response({'code': 400, 'msg': '用户名或密码错误'})
 
 
-# ================= 用户信息视图 (修复 unpack 错误) =================
+# ================= 用户信息视图 (优化加载速度) =================
 class UserInfoView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -39,27 +39,19 @@ class UserInfoView(APIView):
         except UserProfile.DoesNotExist:
             profile = UserProfile.objects.create(user=user, balance=200000, initial_capital=200000)
 
+        # 🚀 优化方案：直接读取数据库存储的余额，不再调用 calculate_asset_status 进行全量回溯
+        # 理由：下单视图和转账视图已经保证了 profile.balance 的实时性
         real_balance = profile.balance
 
-        try:
-            from trade.views import calculate_asset_status
-            from trade.time_utils import get_mock_now
-
-            now = get_mock_now()
-            if timezone.is_naive(now): now = timezone.make_aware(now)
-
-            # 🟢 修复：接收 4 个返回值 (忽略最后一个成本字段)
-            _, _, calculated_cash, _ = calculate_asset_status(user, now)
-
-            real_balance = calculated_cash
-
-        except Exception as e:
-            # 这里的报错已经被修复，应该不会再打印了
-            print(f"❌ [UserInfo] 余额计算失败: {e}")
+        # 如果未来需要极度精确的市值同步，建议将市值计算结果缓存或异步更新
+        # 目前直接返回以消除前端加载转圈
 
         serializer = UserProfileSerializer(profile)
         data = serializer.data
         data['balance'] = float(real_balance)
+
+        # 总资产在 Dashboard 中由前端或专门的 performance 接口处理
+        # 这里暂时保持逻辑一致，使用 balance 作为基准
         data['total_assets'] = float(real_balance)
 
         return Response({'code': 200, 'msg': '获取成功', 'data': data})

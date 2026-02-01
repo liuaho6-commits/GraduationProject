@@ -63,9 +63,8 @@ def calculate_asset_status(user, target_time, use_minute_data=False):
     holdings = {}
 
     orders = Order.objects.filter(user=user, status='filled', order_time__lte=target_time).order_by('order_time')
-    avg_costs = {}
-    temp_holdings = {}
 
+    # 模拟重新撮合，计算当前剩余现金和持仓
     for order in orders:
         price = Decimal(str(order.price))
         vol = int(order.volume)
@@ -73,29 +72,19 @@ def calculate_asset_status(user, target_time, use_minute_data=False):
         if order.direction == 'buy':
             cash -= cost
             holdings[order.stock_code] = holdings.get(order.stock_code, 0) + vol
-
-            old_vol = temp_holdings.get(order.stock_code, 0)
-            old_cost = avg_costs.get(order.stock_code, Decimal(0))
-            if (old_vol + vol) > 0:
-                avg_costs[order.stock_code] = (old_cost * old_vol + price * vol) / (old_vol + vol)
-                temp_holdings[order.stock_code] = old_vol + vol
         elif order.direction == 'sell':
             cash += cost
             holdings[order.stock_code] = max(0, holdings.get(order.stock_code, 0) - vol)
-            temp_holdings[order.stock_code] = max(0, temp_holdings.get(order.stock_code, 0) - vol)
 
     market_value = Decimal('0.0')
-    current_holdings_cost = Decimal('0.0')
-
-    # 🔴 调试价格查找
     debug_price_info = ""
 
+    # 计算持仓市值
     for code, vol in holdings.items():
         if vol <= 0: continue
-        current_holdings_cost += avg_costs.get(code, Decimal(0)) * vol
         price = Decimal('0.0')
 
-        # 严格限制：15:00前禁止偷看当日StockData
+        # 严格限制：15:00前禁止偷看当日日线StockData
         can_use_daily = target_time.hour >= 15
 
         daily_row = None
@@ -104,32 +93,32 @@ def calculate_asset_status(user, target_time, use_minute_data=False):
 
         if daily_row:
             price = Decimal(str(daily_row.close))
-            debug_price_info = f"{code}: {price} (Daily)"
         else:
             day_start = target_time.replace(hour=0, minute=0, second=0)
             minute_row = StockMinuteData.objects.filter(code=code, date__lte=target_time, date__gte=day_start).order_by(
                 '-date').first()
             if minute_row:
                 price = Decimal(str(minute_row.close))
-                debug_price_info = f"{code}: {price} (Minute {minute_row.date.strftime('%H:%M')})"
             else:
                 prev_daily = StockData.objects.filter(code=code, date__lt=target_time.date()).order_by('-date').first()
                 if prev_daily:
                     price = Decimal(str(prev_daily.close))
-                    debug_price_info = f"{code}: {price} (PrevDaily)"
 
         market_value += Decimal(vol) * price
 
-    return cash + market_value, market_value, cash, current_holdings_cost, debug_price_info
+    # 返回: 总资产, 市值, 现金, (占位符), 调试信息
+    return cash + market_value, market_value, cash, Decimal('0.0'), debug_price_info
 
 
-# ================= 收益表现 (带调试) =================
+# ================= 收益表现 (修正版) =================
 class PerformanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         query_type = request.GET.get('type', 'daily')
         now = get_mock_now()
+
+
         if timezone.is_naive(now): now = timezone.make_aware(now)
         data = []
 
@@ -139,71 +128,89 @@ class PerformanceView(APIView):
             if profile.initial_capital <= 0:
                 profile.initial_capital = Decimal('200000.0')
                 profile.save()
+            # 这是用户的本金（包含累计充值）
             initial_capital = profile.initial_capital
         except:
             initial_capital = Decimal('200000.0')
 
+        # 🟢 场景 A: 分时图 (日内收益)
         if query_type == 'intraday':
             start = now.replace(hour=9, minute=30, second=0, microsecond=0)
             yesterday_close_time = (start - datetime.timedelta(days=1)).replace(hour=15, minute=0, second=0)
 
-            # 获取昨收状态
-            base_assets, _, _, base_invested, _ = calculate_asset_status(request.user, yesterday_close_time)
-            if base_assets <= 0: base_assets = initial_capital
+            # 1. 获取昨收总资产 (作为今日涨跌的基准分母)
+            # 注意：如果昨天是周末，这里应该逻辑上找最近一个交易日，但简单起见先取前一天
+            base_assets, _, _, _, _ = calculate_asset_status(request.user, yesterday_close_time)
+
+            # 极端的边界情况：如果是新用户第一天，昨收资产为0，则用本金作为基准
+            if base_assets <= 0:
+                base_assets = initial_capital
 
             curr = start
-            print(f"\n======== [DEBUG INTRADAY] {now.date()} ========")
+
+            # 打印调试信息
+            print(f"\n======== [修正版] INTRA-DAY {now.date()} ========")
+            print(f"基准资产 (昨收): {base_assets:.2f}")
 
             while curr <= now:
-                # 获取当前状态
-                # 注意：这里我们接收第4个参数 curr_invested
-                curr_assets, _, _, curr_invested, price_info = calculate_asset_status(request.user, curr, True)
+                # 获取当前时刻的总资产
+                curr_assets, _, _, _, _ = calculate_asset_status(request.user, curr, True)
 
+                # 🟢 修正：日内收益额 = 当前资产 - 昨收资产
                 profit = curr_assets - base_assets
 
-                # 🟢 修正分母：使用当前投入成本 (curr_invested)
-                # 如果没持仓，分母退化为 initial_capital (避免除以0)
-                denominator = curr_invested if curr_invested > 0 else initial_capital
+                # 🟢 修正：日内收益率 = (收益额 / 昨收资产) * 100%
+                # 这才符合“今天账户涨了几个点”的定义，和仓位无关
+                rate = (profit / base_assets) * 100
 
-                rate = (profit / denominator) * 100
-
-                # 🔴 打印调试日志 (只打印整点，防止刷屏)
-                if curr.minute == 0 or curr.minute == 30:
-                    print(f"时间: {curr.strftime('%H:%M')} | 价格源: {price_info}")
-                    print(f"   盈亏: {profit:.2f} (Curr: {curr_assets:.2f} - Base: {base_assets:.2f})")
-                    print(f"   分母: {denominator:.2f} (投入成本)")
-                    print(f"   收益率: {rate:.4f}%")
-                    print("------------------------------------------------")
-
-                data.append({'time': curr.strftime('%H:%M'), 'total_return_rate': round(float(rate), 2),
-                             'profit': round(float(profit), 2)})
+                data.append({
+                    'time': curr.strftime('%H:%M'),
+                    'total_return_rate': round(float(rate), 2),
+                    'profit': round(float(profit), 2)
+                })
 
                 curr += datetime.timedelta(minutes=5)
-                if curr.hour == 11 and curr.minute > 30: curr = curr.replace(hour=13, minute=0)
+                # 跳过午休
+                if curr.hour == 11 and curr.minute > 30:
+                    curr = curr.replace(hour=13, minute=0)
             print("================================================\n")
+
+        # 🟢 场景 B: 日线图 (累计收益)
         else:
-            # 日线逻辑
-            start_date = (now - datetime.timedelta(days=30)).date()
+            # 这里的 start_date 决定了前端能拉取多远的历史数据
+            start_date = (now - datetime.timedelta(days=365)).date()  # 默认最近1年
+
             curr = start_date
             prev_assets = initial_capital
+
+            if curr > now.date(): curr = now.date()
+
             while curr <= now.date():
                 target = datetime.datetime.combine(curr, datetime.time(15, 0))
                 if timezone.is_naive(target): target = timezone.make_aware(target)
+                # 还没到今天的15点，就用现在的时间算
                 if target > now: target = now
 
-                assets, _, _, invested_cost, _ = calculate_asset_status(request.user, target)
+                assets, _, _, _, _ = calculate_asset_status(request.user, target)
+
+                # 🟢 修正：累计收益额 = 当前资产 - 初始本金
                 total_profit = assets - initial_capital
 
-                # 🟢 日线分母修正
-                denominator = invested_cost if invested_cost > 0 else initial_capital
-                rate = (total_profit / denominator) * 100
+                # 🟢 修正：累计收益率 = (累计收益 / 初始本金) * 100%
+                # 无论是否空仓，分母始终是本金，收益率曲线会非常平滑
+                rate = (total_profit / initial_capital) * 100
+
+                # 当日盈亏 = 今日资产 - 昨日资产 (估算)
+                day_profit = assets - prev_assets
 
                 data.append({
                     'date': curr.strftime('%Y-%m-%d'),
                     'total_return_rate': round(float(rate), 2),
                     'profit': round(float(total_profit), 2),
-                    'day_profit': round(float(assets - prev_assets), 2)
+                    'day_profit': round(float(day_profit), 2),
+                    'total_assets': round(float(assets), 2)  # 前端如果需要显示总资产曲线可用
                 })
+
                 prev_assets = assets
                 curr += datetime.timedelta(days=1)
 
@@ -223,15 +230,18 @@ class FundTransferView(APIView):
                 if amount < 0 and profile.balance < abs(amount):
                     return Response({'code': 400, 'msg': '余额不足'})
                 if profile.initial_capital <= 0: profile.initial_capital = Decimal('200000.0')
+
                 profile.balance += amount
+                # 🟢 关键：出入金时同步调整本金，确保收益率计算准确
                 profile.initial_capital += amount
+
                 profile.save()
             return Response({'code': 200, 'msg': '操作成功', 'data': {'balance': float(profile.balance)}})
         except Exception as e:
             return Response({'code': 500, 'msg': str(e)})
 
 
-# ================= 其他视图 =================
+# ================= 其他视图 (保持不变) =================
 class StrategyView(APIView):
     permission_classes = [IsAuthenticated]
 
