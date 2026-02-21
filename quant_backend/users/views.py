@@ -29,34 +29,32 @@ class LoginView(APIView):
 
 
 # ================= 用户信息视图 (优化加载速度) =================
+# quant_backend/users/views.py
+
+# ... (其他 import)
+
 class UserInfoView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        try:
-            profile = UserProfile.objects.get(user=user)
-        except UserProfile.DoesNotExist:
-            profile = UserProfile.objects.create(user=user, balance=200000, initial_capital=200000)
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        # 实时触发一次高性能刷新
+        profile.update_asset_cache()
 
-        # 🚀 优化方案：直接读取数据库存储的余额，不再调用 calculate_asset_status 进行全量回溯
-        # 理由：下单视图和转账视图已经保证了 profile.balance 的实时性
-        real_balance = profile.balance
-
-        # 如果未来需要极度精确的市值同步，建议将市值计算结果缓存或异步更新
-        # 目前直接返回以消除前端加载转圈
-
-        serializer = UserProfileSerializer(profile)
-        data = serializer.data
-        data['balance'] = float(real_balance)
-
-        # 总资产在 Dashboard 中由前端或专门的 performance 接口处理
-        # 这里暂时保持逻辑一致，使用 balance 作为基准
-        data['total_assets'] = float(real_balance)
-
-        return Response({'code': 200, 'msg': '获取成功', 'data': data})
-
-
+        return Response({
+            'code': 200,
+            'data': {
+                'total_assets': float(profile.last_total_assets),
+                'market_value': float(profile.last_market_value),
+                'balance': float(profile.balance),
+                'withdrawable': float(profile.withdrawable_cash),
+                'daily_profit': float(profile.daily_profit),
+                'total_profit': float(profile.total_profit),
+                # 👇👇👇 必须加上这一行 👇👇👇
+                'initial_capital': float(profile.initial_capital),
+                'username': request.user.username
+            }
+        })
 # ================= 注册视图 =================
 class RegisterView(APIView):
     permission_classes = [AllowAny]

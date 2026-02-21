@@ -3,6 +3,7 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.apps import apps  # 引入 apps
 
 
 # ================= 1. 策略模型 =================
@@ -122,6 +123,11 @@ class SystemSettings(models.Model):
         verbose_name_plural = verbose_name
         db_table = 'system_settings'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 记录加载时的原始时间，用于判断是否发生了时间跳跃
+        self._original_time = self.current_mock_time
+
     @classmethod
     def get_settings(cls):
         obj, created = cls.objects.get_or_create(id=1)
@@ -131,29 +137,55 @@ class SystemSettings(models.Model):
         return f"系统时间控制 (当前: {self.current_mock_time})"
 
 
-# ================= 🟢 8. 上帝模式：时光倒流自动清洗信号 =================
+# ================= 🟢 8. 上帝模式：全量重置 =================
 @receiver(post_save, sender=SystemSettings)
 def on_time_travel_cleanup(sender, instance, **kwargs):
     """
     当在 Admin 后台手动修改系统时间时触发。
-    自动删除所有“未来”的订单和收益记录，防止穿越导致的余额错误。
+    警告：如果检测到时间变更，将执行【核弹级】全量重置：
+         清空所有订单、持仓、收益记录，重置用户本金。
+         (类似于格式化账号，变成新号)
     """
-    # 1. 获取新设置的时间
+    # 1. 检查是否仅仅修改了倍速 (时间未变则不重置)
+    # 注意：clock_tick 使用 .update() 更新数据库，不会触发 post_save
+    # 所以只要触发了这个信号，大概率是人工修改
+    if hasattr(instance, '_original_time') and instance.current_mock_time == instance._original_time:
+        # print(">>> [God Mode] 仅参数调整，时间未变，跳过重置。")
+        return
+
     god_time = instance.current_mock_time
+    print(f"\n☢️☢️☢️ [God Mode] 检测到时间线跃迁至 {god_time} ☢️☢️☢️")
+    print(f"⚠️ 正在执行全量数据格式化 (重置为新账号状态)...")
 
-    print(f"\n⚡⚡⚡ [God Mode] 检测到时间变更至 {god_time} ⚡⚡⚡")
-    print(f"正在清洗未来数据...")
+    # 2. 清空所有交易数据
+    print("   >>> 正在清空订单表 (Order) ...")
+    Order.objects.all().delete()  # 会级联删除 TradeRecord
 
-    # 2. 删除未来订单 (级联删除 TradeRecord)
-    orders_deleted, _ = Order.objects.filter(order_time__gt=god_time).delete()
-    if orders_deleted > 0:
-        print(f"   >>> 已删除未来订单: {orders_deleted} 条")
+    print("   >>> 正在清空持仓表 (Position) ...")
+    Position.objects.all().delete()
 
-    # 3. 删除未来日收益记录
-    # 转换 datetime 为 date 进行比较
-    god_date = god_time.date()
-    daily_deleted, _ = DailyPerformance.objects.filter(date__gt=god_date).delete()
-    if daily_deleted > 0:
-        print(f"   >>> 已删除未来日报: {daily_deleted} 条")
+    print("   >>> 正在清空业绩报表 (Performance) ...")
+    DailyPerformance.objects.all().delete()
+    IntradayPerformance.objects.all().delete()
 
-    print(f"清洗完成。现在是纯净的 {god_time}。\n")
+    # 3. 重置所有用户的资产状态
+    UserProfile = apps.get_model('users', 'UserProfile')
+    print("   >>> 正在重置用户资产 (UserProfile) ...")
+
+    users_profiles = UserProfile.objects.all()
+    for profile in users_profiles:
+        # 重置回初始本金
+        init_cap = profile.initial_capital
+        profile.balance = init_cap
+        profile.withdrawable_cash = init_cap
+
+        # 归零收益指标
+        profile.last_market_value = 0
+        profile.last_total_assets = init_cap
+        profile.daily_profit = 0
+        profile.total_profit = 0
+
+        profile.save()
+        print(f"       User {profile.user.username}: 资产已重置为 {init_cap}")
+
+    print(f"✅ 全量重置完成。当前是纯净的 {god_time} (新开局)。\n")

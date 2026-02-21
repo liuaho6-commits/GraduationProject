@@ -10,5 +10,5 @@ class StockDataAdmin(admin.ModelAdmin):
 # 修改点 2：为新表增加后台管理配置
 @admin.register(StockBasicInfo)
 class StockBasicInfoAdmin(admin.ModelAdmin):
-    list_display = ('code', 'name')  # 让后台列表显示代码、名称、行业
+    list_display = ('code', 'name')  # 让后台列表显示代码、名称
     search_fields = ('code', 'name')             # 支持按代码或名称搜索

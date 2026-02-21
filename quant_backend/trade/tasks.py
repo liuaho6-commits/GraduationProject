@@ -1,135 +1,180 @@
 import logging
 import datetime
+from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
 from .engine import TradingEngine
-from .time_utils import get_mock_now, set_mock_now, get_next_trading_time
+from .time_utils import get_mock_now, get_next_trading_time
 
 logger = logging.getLogger(__name__)
 
-# 全局单例引擎
 engine = TradingEngine()
 
 
 def clock_tick():
     """
-    系统时钟心跳：
-    1. 读取数据库时间
-    2. 增加时间
-    3. 跳过休市
-    4. 写回数据库
+    系统时钟心跳：驱动时间流逝、触发撮合、触发定时快照
     """
-    # 🟢 延迟导入，防止循环引用
     from .models import SystemSettings
 
     try:
-        # 获取配置（不使用缓存，直接查库确保实时性）
         settings = SystemSettings.objects.first()
-        if not settings:
+        if not settings or settings.time_speed <= 0:
             return
 
-        # 如果倍速 <= 0，暂停时间流逝
-        if settings.time_speed <= 0:
-            return
-
-        # 1. 获取当前“上帝时间”
+        # 1. 时间流逝
         now = settings.current_mock_time
-
-        # 2. 计算流逝后的新时间
         delta = datetime.timedelta(seconds=settings.time_speed)
         new_time = now + delta
 
-        # 3. 判断是否需要触发收盘结算 (跨越 15:00)
-        if now.hour < 15 and (new_time.hour >= 15 or new_time.day > now.day):
+        # 2. 触发分时快照 (Intraday Snapshot)
+        if new_time.minute != now.minute and new_time.minute % 5 == 0:
+            # print(f"📸 [Snapshot] Recording intraday assets at {new_time.strftime('%H:%M')}...")
+            record_intraday_snapshot(new_time)
+
+        # 3. 触发收盘结算 (15:00)
+        # 这里的逻辑是：如果跨越了15点，或者跨越了日期（针对跳过休市的情况）
+        if now.hour < 15 and (new_time.hour >= 15 or new_time.date() > now.date()):
+            print(f"🏁 [Settlement] Daily settlement for {now.date()}...")
             record_daily_performance()
 
-        # 4. 应用跳过休市逻辑
+        # 4. 跳过休市
         if settings.skip_non_trading:
             valid_time = get_next_trading_time(new_time)
         else:
             valid_time = new_time
 
-        # 5. 写回数据库 (更新上帝时间)
-        # update 比 save 更快且线程安全
+        # 5. 更新时间
         SystemSettings.objects.filter(id=settings.id).update(current_mock_time=valid_time)
 
-        # 6. 触发策略
-        run_active_strategies()
+        # 6. 撮合交易
+        if engine:
+            engine.run_all_active_strategies()
 
     except Exception as e:
-        print(f"Clock tick warning: {e}")
+        print(f"Clock tick error: {e}")
 
 
-def run_active_strategies():
-    if engine:
-        engine.run_all_active_strategies()
+def record_intraday_snapshot(current_time):
+    """
+    记录日内分时资产 (快照)
+    """
+    from django.contrib.auth.models import User
+    from .models import IntradayPerformance, Position
+    from users.models import UserProfile
+    from stocks.models import StockMinuteData, StockData
+
+    users = User.objects.all()
+    for user in users:
+        try:
+            profile = user.profile  # 注意：Django反向查询通常是 user.profile (取决于 related_name)
+            # 如果 related_name='profile'，则用 user.profile。如果是默认，可能是 user.userprofile
+            # 根据 models.py 定义: user = models.OneToOneField(..., related_name='profile')
+
+            positions = Position.objects.filter(user=user, volume__gt=0)
+            market_value = Decimal('0.00')
+
+            for pos in positions:
+                price = Decimal(str(pos.avg_price))
+                m_data = StockMinuteData.objects.filter(
+                    code=pos.stock_code,
+                    date__lte=current_time
+                ).order_by('-date').only('close').first()
+
+                if m_data:
+                    price = Decimal(str(m_data.close))
+                else:
+                    d_data = StockData.objects.filter(
+                        code=pos.stock_code,
+                        date__lte=current_time.date()
+                    ).order_by('-date').only('close').first()
+                    if d_data:
+                        price = Decimal(str(d_data.close))
+
+                market_value += price * Decimal(str(pos.volume))
+
+            total_assets = profile.balance + market_value
+
+            base = profile.initial_capital
+            ret_rate = ((total_assets - base) / base * 100) if base > 0 else 0
+
+            IntradayPerformance.objects.update_or_create(
+                user=user,
+                time=current_time,
+                defaults={
+                    'total_assets': total_assets,
+                    'total_return_rate': ret_rate
+                }
+            )
+
+        except Exception as e:
+            # print(f"Snapshot error for user {user.id}: {e}")
+            continue
 
 
 def record_daily_performance():
     """
-    每日收盘结算逻辑
+    每日收盘结算：记录总资产、日收益、日收益率
     """
     from django.contrib.auth.models import User
-    from .models import DailyPerformance, Position
-    from stocks.models import StockData
+    from .models import DailyPerformance, Position, IntradayPerformance
     from users.models import UserProfile
+    from stocks.models import StockData, StockMinuteData
+    from .time_utils import get_mock_now
 
-    # 使用当前的模拟时间进行结算
     current_mock_time = get_mock_now()
     today = current_mock_time.date()
 
     users = User.objects.all()
     for user in users:
         try:
-            with transaction.atomic():
-                try:
-                    profile = user.userprofile
-                except UserProfile.DoesNotExist:
-                    continue
+            profile = user.profile  # 使用 related_name='profile'
 
-                # 资金与持仓
-                balance = float(profile.balance)
-                initial_capital = float(profile.initial_capital) if profile.initial_capital > 0 else 200000.0
+            # 1. 触发一次精确的资产更新
+            profile.update_asset_cache()
 
-                positions = Position.objects.filter(user=user)
-                market_value = 0.0
+            total_assets = profile.last_total_assets
+            total_profit = profile.total_profit
 
-                for pos in positions:
-                    # 获取该股票在“上帝时间”之前的最新价格
-                    latest_price_obj = StockData.objects.filter(
-                        code=pos.stock_code,
-                        date__lte=today
-                    ).order_by('-date').first()
+            # 2. 计算日收益
+            yesterday_perf = DailyPerformance.objects.filter(
+                user=user, date__lt=today
+            ).order_by('-date').first()
 
-                    price = float(latest_price_obj.close) if latest_price_obj else pos.avg_price
-                    market_value += price * pos.volume
+            day_profit = Decimal('0.00')
+            prev_assets = profile.initial_capital  # 默认基准为初始本金
 
-                total_assets = balance + market_value
+            if yesterday_perf:
+                day_profit = total_assets - yesterday_perf.total_assets
+                prev_assets = yesterday_perf.total_assets
+            else:
+                # 第一天交易，日收益 = 总收益
+                day_profit = total_profit
 
-                # 计算收益
-                total_profit = total_assets - initial_capital
-                total_return_rate = (total_profit / initial_capital * 100) if initial_capital > 0 else 0
+            # 3. 计算当日收益率 (Day Return Rate)
+            # 公式：当日收益 / 昨日总资产 * 100%
+            day_return_rate = 0.0
+            if prev_assets > 0:
+                day_return_rate = float((day_profit / prev_assets) * 100)
 
-                # 计算日收益 (相比昨日)
-                yesterday_perf = DailyPerformance.objects.filter(
-                    user=user,
-                    date__lt=today
-                ).order_by('-date').first()
+            # 4. 存盘
+            DailyPerformance.objects.update_or_create(
+                user=user,
+                date=today,
+                defaults={
+                    'total_assets': total_assets,
+                    'day_profit': day_profit,
+                    'total_return_rate': (float(total_profit) / float(
+                        profile.initial_capital) * 100) if profile.initial_capital else 0,
+                    'day_return_rate': day_return_rate
+                }
+            )
 
-                day_profit = 0
-                if yesterday_perf:
-                    day_profit = total_assets - float(yesterday_perf.total_assets)
+            # 5. 清理旧的分时数据 (可选，防止数据库爆炸)
+            IntradayPerformance.objects.filter(
+                user=user,
+                time__date__lt=today
+            ).delete()
 
-                # 存入数据库
-                DailyPerformance.objects.update_or_create(
-                    user=user,
-                    date=today,
-                    defaults={
-                        'total_assets': total_assets,
-                        'day_profit': day_profit,
-                        'total_return_rate': total_return_rate,
-                        'day_return_rate': 0  # 简化
-                    }
-                )
         except Exception as e:
-            print(f"结算失败 {user.username}: {e}")
+            print(f"Settlement failed for {user.username}: {e}")

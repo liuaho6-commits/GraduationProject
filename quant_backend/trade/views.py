@@ -302,6 +302,7 @@ class PlaceOrderView(APIView):
                 if timezone.is_naive(mock_now): mock_now = timezone.make_aware(mock_now)
                 Order.objects.create(user=user, stock_code=code, direction=direction, price=float(price), volume=vol,
                                      status='filled', order_time=mock_now)
+                profile.update_asset_cache()
             return Response({'code': 200, 'msg': '交易成功'})
         except Exception as e:
             return Response({'code': 500, 'msg': f'交易失败: {str(e)}'})

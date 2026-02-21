@@ -59,7 +59,7 @@
             </el-form-item>
 
             <el-form-item label="委托数量">
-               <el-input-number v-model="tradeVolume" :step="100" :min="100" step-strictly style="width: 100%" />
+               <el-input-number v-model="tradeVolume" :step="100" :min="0" step-strictly style="width: 100%" />
                <div class="quick-btns">
                  <el-button size="small" @click="setVolume(0.33)">1/3</el-button>
                  <el-button size="small" @click="setVolume(0.5)">1/2</el-button>
@@ -69,7 +69,10 @@
 
             <div class="asset-info">
                <div v-if="tradeDirection === 'buy'">
-                 <small>可用资金: ¥{{ formatPrice(userBalance) }}</small>
+                 <small :class="{ 'text-danger': latestPrice > 0 && userBalance < latestPrice * 100 }">
+                   可用资金: ¥{{ formatPrice(userBalance) }}
+                   <span v-if="latestPrice > 0 && userBalance < latestPrice * 100"> (余额不足)</span>
+                 </small>
                </div>
                <div v-else>
                  <small>持仓股数: {{ userPosition }}</small>
@@ -82,6 +85,7 @@
               :class="tradeDirection === 'buy' ? 'buy-btn' : 'sell-btn'"
               @click="handleTrade"
               :loading="tradeLoading"
+              :disabled="tradeDirection === 'buy' && latestPrice > 0 && userBalance < latestPrice * 100"
             >
               {{ tradeDirection === 'buy' ? '买入' : '卖出' }}
             </el-button>
@@ -113,7 +117,8 @@ const viewMode = ref('min')
 const tradeDirection = ref('buy')
 const tradePrice = ref(0)
 const latestPrice = ref(0)
-const tradeVolume = ref(100)
+// 🟢 核心修改1：默认值直接给 0，防止刷新瞬间显示 100
+const tradeVolume = ref(0)
 const userBalance = ref(0)
 const userPosition = ref(0)
 const tradeLoading = ref(false)
@@ -131,6 +136,17 @@ const formatPrice = (val) => {
     return Number(val).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
 }
 
+// 🟢 辅助函数：检查是否能买得起一手，智能设置默认值
+// 只有当 tradeVolume 还是 0 (初始状态) 且 钱够买一手时，才自动填 100
+const trySetDefaultVolume = () => {
+    if (tradeDirection.value === 'buy' && tradeVolume.value === 0 && latestPrice.value > 0) {
+        if (userBalance.value >= latestPrice.value * 100) {
+            tradeVolume.value = 100
+        }
+        // 如果买不起，保持 0，什么都不做
+    }
+}
+
 const fetchQuote = async () => {
     const api = getApi()
     try {
@@ -141,6 +157,7 @@ const fetchQuote = async () => {
                  const newPrice = parseFloat(data[data.length - 1].close)
                  latestPrice.value = newPrice
                  tradePrice.value = parseFloat(newPrice.toFixed(2))
+                 trySetDefaultVolume() // 价格更新了，试着重置默认值
              }
              stockName.value = res.data.name
              systemTimeDisplay.value = res.data.current_mock_time || ''
@@ -168,24 +185,32 @@ const fetchUserAssets = async () => {
     const api = getApi()
     try {
         const userRes = await api.get('api/users/info/').catch(()=>null) || await api.get('users/api/info/')
-        if (userRes.data.code === 200) {
+        if (userRes && userRes.data.code === 200) {
             const data = userRes.data.data || userRes.data
             userBalance.value = parseFloat(data.balance || 0)
+            trySetDefaultVolume() // 余额更新了，试着重置默认值
         }
         const posRes = await api.get(`api/trade/position/${stockCode}/`)
-        if (posRes.data.code === 200) {
+        if (posRes && posRes.data.code === 200) {
             userPosition.value = posRes.data.data.volume || 0
         }
     } catch (e) { console.error(e) }
 }
 
 const setVolume = (ratio) => {
-    if (tradePrice.value <= 0) return ElMessage.warning('当前价格无效')
+    if (tradePrice.value <= 0) return
 
     if (tradeDirection.value === 'buy') {
         const money = userBalance.value * ratio
-        const vol = Math.floor(money / tradePrice.value / 100) * 100
-        tradeVolume.value = vol
+        // 计算最大可买手数
+        const maxHand = Math.floor(money / tradePrice.value / 100)
+
+        // 🟢 核心修改2：如果买不起，直接静默置 0，移除所有 ElMessage.warning
+        if (maxHand < 1) {
+            tradeVolume.value = 0
+        } else {
+            tradeVolume.value = maxHand * 100
+        }
     } else {
         const vol = Math.floor(userPosition.value * ratio / 100) * 100
         tradeVolume.value = (ratio === 1.0) ? userPosition.value : vol
@@ -271,6 +296,7 @@ onBeforeUnmount(() => {
 .buy-btn { background-color: #f56c6c; border-color: #f56c6c; }
 .sell-btn { background-color: #67c23a; border-color: #67c23a; }
 .asset-info { margin-top: 10px; color: #666; font-size: 13px; background: #f1f5f9; padding: 8px; border-radius: 4px; }
+.text-danger { color: #f56c6c; font-weight: bold; }
 .live-tag { display: flex; align-items: center; gap: 4px; }
 .dot { width: 6px; height: 6px; background: #67c23a; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
 .price-hint { font-size: 12px; color: #999; margin-top: 4px; }
