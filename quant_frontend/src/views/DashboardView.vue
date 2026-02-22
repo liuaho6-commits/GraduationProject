@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard-container">
     <el-card class="asset-panel-card" shadow="never" v-loading="loading">
-      <div class="asset-main">
+       <div class="asset-main">
         <div class="total-assets-box">
           <span class="label">总资产 (元)</span>
           <h2 class="total-value">¥ {{ formatNumber(userData.total_assets) }}</h2>
@@ -23,11 +23,9 @@
           </div>
         </div>
       </div>
-
-      <el-divider />
-
-      <el-row :gutter="20" class="asset-grid">
-        <el-col :span="6">
+       <el-divider />
+       <el-row :gutter="20" class="asset-grid">
+         <el-col :span="6">
           <div class="grid-item">
             <span class="label">总市值</span>
             <span class="value">¥ {{ formatNumber(userData.market_value) }}</span>
@@ -48,12 +46,14 @@
         <el-col :span="6" class="action-col">
           <el-button type="primary" size="small" @click="openTransferDialog">银证转账</el-button>
         </el-col>
-      </el-row>
+       </el-row>
     </el-card>
 
     <div class="chart-section">
       <PerformanceChart :user-data="userData" />
     </div>
+
+    <PositionList ref="positionListRef" />
 
     <div class="table-section">
       <el-card shadow="never">
@@ -71,11 +71,12 @@
             </template>
           </el-table-column>
 
-          <el-table-column label="股票代码" width="120">
+          <el-table-column label="股票名称" width="140">
             <template #default="scope">
               <span class="stock-link" @click="goToStock(scope.row.stock_code)">
-                {{ scope.row.stock_code }}
+                {{ scope.row.stock_name || scope.row.stock_code }}
               </span>
+              <span style="font-size: 12px; color: #999; margin-left: 5px;">{{ scope.row.stock_code }}</span>
             </template>
           </el-table-column>
 
@@ -100,7 +101,7 @@
     </div>
 
     <el-dialog v-model="transferDialogVisible" title="银证转账" width="400px">
-      <el-form label-position="top">
+       <el-form label-position="top">
         <el-form-item label="操作类型">
           <el-radio-group v-model="transferType">
             <el-radio-button value="deposit">转入 (充值)</el-radio-button>
@@ -126,17 +127,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue' // 引入 computed 和 onUnmounted
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import PerformanceChart from '../components/PerformanceChart.vue'
+import PositionList from '../components/PositionList.vue' // 🟢 引入新组件
 
 const router = useRouter()
-const loading = ref(true)      // 首次加载的 loading
-const tableLoading = ref(false) // 表格单独的 loading
-const timer = ref(null)        // 定时器引用
+const loading = ref(true)
+const tableLoading = ref(false)
+const timer = ref(null)
+const positionListRef = ref(null) // 🟢 持仓组件的引用
 
+// ... (userData, computed 属性等保持不变) ...
 const userData = ref({
   total_assets: 0,
   market_value: 0,
@@ -144,7 +148,7 @@ const userData = ref({
   withdrawable: 0,
   daily_profit: 0,
   total_profit: 0,
-  initial_capital: 200000 
+  initial_capital: 200000
 })
 
 const recentOrders = ref([])
@@ -152,25 +156,23 @@ const transferDialogVisible = ref(false)
 const transferAmount = ref('')
 const transferType = ref('deposit')
 
-// === 新增：计算收益率 ===
 const totalReturnRate = computed(() => {
-    const initial = userData.value.initial_capital || 1 // 防止除以0
+    const initial = userData.value.initial_capital || 1
     const profit = userData.value.total_profit || 0
     const rate = (profit / initial) * 100
     return (rate > 0 ? '+' : '') + rate.toFixed(2) + '%'
 })
 
 const dailyReturnRate = computed(() => {
-    // 简单估算：日收益率 = 日收益 / (当前资产 - 日收益)  即相对于昨天的资产
     const currentAssets = userData.value.total_assets || 0
     const dailyProfit = userData.value.daily_profit || 0
     const yesterdayAssets = currentAssets - dailyProfit
-    
+
     if (yesterdayAssets <= 0) return '0.00%'
     const rate = (dailyProfit / yesterdayAssets) * 100
     return (rate > 0 ? '+' : '') + rate.toFixed(2) + '%'
 })
-// =======================
+
 
 const getApi = () => {
     return axios.create({
@@ -204,7 +206,6 @@ const openTransferDialog = () => {
     transferDialogVisible.value = true
 }
 
-// 手动刷新专用（带 loading）
 const manualRefresh = () => {
     loading.value = true
     fetchDashboardData().finally(() => {
@@ -213,32 +214,31 @@ const manualRefresh = () => {
 }
 
 const fetchDashboardData = async () => {
-    // 注意：这里不要写 loading.value = true，否则轮询时界面会一直闪烁
     const api = getApi()
     try {
-        // 1. 获取用户信息
+        // 1. 获取基础资产信息
         const userRes = await api.get('api/users/info/').catch(() => api.get('users/api/info/'))
         if (userRes && userRes.data.code === 200) {
             userData.value = userRes.data.data
-            
-            // 核心修正：仅重新计算总盈亏，不篡改日盈亏
+            // 修正总收益计算
             const assets = parseFloat(userData.value.total_assets) || 0
-            const initial = parseFloat(userData.value.initial_capital) || 200000 
-            
-            // 强制统一总收益口径：(当前资产 - 初始本金)
+            const initial = parseFloat(userData.value.initial_capital) || 200000
             userData.value.total_profit = assets - initial
-            
-            // ⚠️ 以前这里有个错误的 if 判断把 daily_profit 设为 0，现在已删除
         }
 
-        // 2. 获取交易记录 (静默刷新，不阻塞)
+        // 2. 获取订单记录
         const ordersRes = await api.get('api/trade/orders/').catch(() => null)
         if (ordersRes && ordersRes.data.code === 200) {
             recentOrders.value = ordersRes.data.data || []
         }
+
+        // 🟢 3. 刷新持仓组件的数据
+        if (positionListRef.value) {
+            positionListRef.value.fetchData()
+        }
+
     } catch (e) {
         if (e.response && e.response.status === 401) {
-             // 如果是轮询时 token 过期，清除定时器并跳转
              clearInterval(timer.value)
              router.push('/login')
         }
@@ -246,6 +246,7 @@ const fetchDashboardData = async () => {
     }
 }
 
+// ... (handleTransfer 保持不变) ...
 const handleTransfer = async () => {
     const amount = parseFloat(transferAmount.value)
     if (!amount || amount <= 0) return ElMessage.warning('请输入有效的金额')
@@ -260,7 +261,7 @@ const handleTransfer = async () => {
         if (res.data.code === 200) {
             ElMessage.success('操作成功')
             transferDialogVisible.value = false
-            manualRefresh() // 转账成功后立即手动刷新一次
+            manualRefresh()
         } else {
             ElMessage.error(res.data.msg || '操作失败')
         }
@@ -269,29 +270,24 @@ const handleTransfer = async () => {
     }
 }
 
-// 生命周期管理
 onMounted(() => {
-    // 首次加载
     fetchDashboardData().finally(() => {
-        loading.value = false // 首次加载完成后取消 loading 遮罩
+        loading.value = false
     })
-
-    // 开启轮询：每 3000ms (3秒) 更新一次数据
     timer.value = setInterval(() => {
         fetchDashboardData()
     }, 3000)
 })
 
-// 页面销毁前清理定时器
 onUnmounted(() => {
     if (timer.value) {
         clearInterval(timer.value)
-        timer.value = null
     }
 })
 </script>
 
 <style scoped>
+/* 保持原有样式，增加一点间距调整 */
 .dashboard-container { padding: 20px; background-color: #f8f9fa; min-height: 100vh; }
 .asset-panel-card { border-radius: 12px; margin-bottom: 20px; border: none; box-shadow: 0 4px 12px rgba(0,0,0,0.05) !important; }
 .asset-main { display: flex; justify-content: space-between; align-items: center; padding: 10px 20px; }
@@ -299,7 +295,7 @@ onUnmounted(() => {
 .profit-summary { display: flex; gap: 40px; }
 .profit-item { display: flex; flex-direction: column; align-items: flex-end; }
 .profit-item span:nth-child(2) { font-size: 20px; font-weight: 600; margin-top: 4px; display: flex; align-items: baseline; gap: 5px; }
-.rate-text { font-size: 13px; font-weight: 400; opacity: 0.8; } /* 新增样式 */
+.rate-text { font-size: 13px; font-weight: 400; opacity: 0.8; }
 .asset-grid { padding: 10px 20px; }
 .grid-item { display: flex; flex-direction: column; gap: 8px; }
 .grid-item .value { font-size: 18px; font-weight: 600; color: #2c3e50; }

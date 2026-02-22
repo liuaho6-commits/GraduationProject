@@ -308,6 +308,89 @@ class PlaceOrderView(APIView):
             return Response({'code': 500, 'msg': f'交易失败: {str(e)}'})
 
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
+from django.utils import timezone
+from django.apps import apps
+from .models import Strategy, Order, Position, DailyPerformance
+from stocks.models import StockMinuteData, StockData
+from .serializers import StrategySerializer, OrderSerializer, PositionSerializer  # 记得引入 PositionSerializer
+from .time_utils import get_mock_now
+import datetime
+from decimal import Decimal
+
+
+# ... (保留你之前的 SystemTimeView, sync_positions, calculate_asset_status 等代码) ...
+
+# ================= 🟢 新增：持仓列表视图 =================
+class PositionListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # 1. 先同步一次持仓，确保数据准确
+        try:
+            # 这里的 sync_positions 需要引用你原有代码中的函数
+            from .views import sync_positions
+            sync_positions(request.user)
+        except:
+            pass
+
+        # 2. 获取所有持仓
+        positions = Position.objects.filter(user=request.user, volume__gt=0)
+
+        # 3. 构造返回数据（包含现价、市值、盈亏）
+        results = []
+        now = get_mock_now()
+        if timezone.is_naive(now): now = timezone.make_aware(now)
+
+        for pos in positions:
+            # 获取最新价格逻辑 (复制自 calculate_asset_status 的逻辑)
+            price = Decimal('0.0')
+            # 严格限制：15:00前禁止偷看当日日线StockData
+            can_use_daily = now.hour >= 15
+
+            daily_row = None
+            if can_use_daily:
+                daily_row = StockData.objects.filter(code=pos.stock_code, date=now.date()).first()
+
+            if daily_row:
+                price = Decimal(str(daily_row.close))
+            else:
+                day_start = now.replace(hour=0, minute=0, second=0)
+                minute_row = StockMinuteData.objects.filter(code=pos.stock_code, date__lte=now,
+                                                            date__gte=day_start).order_by('-date').first()
+                if minute_row:
+                    price = Decimal(str(minute_row.close))
+                else:
+                    prev_daily = StockData.objects.filter(code=pos.stock_code, date__lt=now.date()).order_by(
+                        '-date').first()
+                    if prev_daily:
+                        price = Decimal(str(prev_daily.close))
+                    else:
+                        price = Decimal(str(pos.avg_price))  # 兜底
+
+            # 计算指标
+            market_value = price * Decimal(pos.volume)
+            cost = Decimal(str(pos.avg_price)) * Decimal(pos.volume)
+            profit = market_value - cost
+            profit_rate = (profit / cost * 100) if cost > 0 else 0
+
+            # 序列化基础信息
+            data = PositionSerializer(pos).data
+            # 追加动态信息
+            data['current_price'] = float(price)
+            data['market_value'] = float(market_value)
+            data['profit'] = float(profit)
+            data['profit_rate'] = float(profit_rate)
+
+            results.append(data)
+
+        return Response({'code': 200, 'data': results})
+
+
+# ... (保留 FundTransferView, StrategyView 等其他代码) ...
 class PositionDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -316,3 +399,80 @@ class PositionDetailView(APIView):
         code = stock_code.strip()
         pos = Position.objects.filter(user=request.user, stock_code=code).first()
         return Response({'code': 200, 'data': {'volume': pos.volume if pos else 0}})
+
+
+# ... (保留原有的引用) ...
+from .models import SystemSettings  # 确保引入 SystemSettings
+
+
+# ... (保留原有的 SystemTimeView, PositionListView 等视图) ...
+
+# ================= 🟢 新增：上帝控制台接口 =================
+class SystemControlView(APIView):
+    """
+    上帝模式控制台：明确区分【调速】和【时间穿越】
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        action = request.data.get('action')  # 'set_speed' 或 'set_time'
+
+        try:
+            settings = SystemSettings.get_settings()
+
+            # 🟢 场景1：仅调整流速 (绝不重置数据)
+            if action == 'set_speed':
+                speed = float(request.data.get('speed', 1.0))
+                settings.time_speed = speed
+                settings.save()  # 普通保存，models.py 里已经没有魔法逻辑了
+                return Response({'code': 200, 'msg': f'流速已调整为 {speed}x', 'data': {'speed': speed}})
+
+            # 🟢 场景2：时间穿越 (显式触发重置)
+            elif action == 'set_time':
+                target_time_str = request.data.get('target_time')
+                if not target_time_str:
+                    return Response({'code': 400, 'msg': '缺少 target_time 参数'})
+
+                # 解析时间
+                if isinstance(target_time_str, str):
+                    import datetime
+                    # 简单处理 ISO 格式，建议前端传标准格式
+                    # 如果只有日期，补全时间
+                    if len(target_time_str) <= 10:
+                        target_time_str += " 09:30:00"
+
+                    # 转换为 datetime 对象 (根据你的环境可能需要 tz info)
+                    new_time = datetime.datetime.fromisoformat(target_time_str)
+                    if timezone.is_naive(new_time):
+                        new_time = timezone.make_aware(new_time)
+
+                # 1. 更新时间
+                settings.current_mock_time = new_time
+                settings.save()
+
+                # 2. 🟢 显式调用重置逻辑
+                settings.hard_reset_world()
+
+                return Response({
+                    'code': 200,
+                    'msg': f'时间已跃迁至 {new_time}，世界已重置',
+                    'data': {'current_time': new_time}
+                })
+
+            else:
+                return Response({'code': 400, 'msg': '未知操作 action'})
+
+        except Exception as e:
+            return Response({'code': 500, 'msg': str(e)})
+
+    def get(self, request):
+        """获取当前设置状态"""
+        settings = SystemSettings.get_settings()
+        return Response({
+            'code': 200,
+            'data': {
+                'current_time': settings.current_mock_time,
+                'time_speed': settings.time_speed,
+                'skip_non_trading': settings.skip_non_trading
+            }
+        })

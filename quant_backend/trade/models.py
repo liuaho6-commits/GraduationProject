@@ -1,9 +1,8 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-from django.apps import apps  # 引入 apps
+from django.apps import apps
+from decimal import Decimal
 
 
 # ================= 1. 策略模型 =================
@@ -57,7 +56,7 @@ class Order(models.Model):
     price = models.FloatField(verbose_name="委托价格")
     volume = models.IntegerField(verbose_name="委托数量")
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending', verbose_name="状态")
-    order_time = models.DateTimeField(verbose_name="委托时间")  # 移除了 auto_now_add 以便支持时光机
+    order_time = models.DateTimeField(verbose_name="委托时间")
 
     class Meta:
         verbose_name = "委托订单"
@@ -73,7 +72,7 @@ class TradeRecord(models.Model):
     volume = models.IntegerField(verbose_name="成交数量")
     amount = models.FloatField(verbose_name="成交金额")
     fee = models.FloatField(default=0.0, verbose_name="手续费")
-    trade_time = models.DateTimeField(verbose_name="成交时间")  # 同样移除 auto_now_add
+    trade_time = models.DateTimeField(verbose_name="成交时间")
 
     class Meta:
         verbose_name = "成交记录"
@@ -123,11 +122,6 @@ class SystemSettings(models.Model):
         verbose_name_plural = verbose_name
         db_table = 'system_settings'
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # 记录加载时的原始时间，用于判断是否发生了时间跳跃
-        self._original_time = self.current_mock_time
-
     @classmethod
     def get_settings(cls):
         obj, created = cls.objects.get_or_create(id=1)
@@ -136,56 +130,56 @@ class SystemSettings(models.Model):
     def __str__(self):
         return f"系统时间控制 (当前: {self.current_mock_time})"
 
+    def hard_reset_world(self):
+        """
+        公开的核弹级重置方法，仅在显式调用时执行
+        """
+        Order = apps.get_model('trade', 'Order')
+        Position = apps.get_model('trade', 'Position')
+        DailyPerformance = apps.get_model('trade', 'DailyPerformance')
+        IntradayPerformance = apps.get_model('trade', 'IntradayPerformance')
+        UserProfile = apps.get_model('users', 'UserProfile')
 
-# ================= 🟢 8. 上帝模式：全量重置 =================
-@receiver(post_save, sender=SystemSettings)
-def on_time_travel_cleanup(sender, instance, **kwargs):
-    """
-    当在 Admin 后台手动修改系统时间时触发。
-    警告：如果检测到时间变更，将执行【核弹级】全量重置：
-         清空所有订单、持仓、收益记录，重置用户本金。
-         (类似于格式化账号，变成新号)
-    """
-    # 1. 检查是否仅仅修改了倍速 (时间未变则不重置)
-    # 注意：clock_tick 使用 .update() 更新数据库，不会触发 post_save
-    # 所以只要触发了这个信号，大概率是人工修改
-    if hasattr(instance, '_original_time') and instance.current_mock_time == instance._original_time:
-        # print(">>> [God Mode] 仅参数调整，时间未变，跳过重置。")
-        return
+        print(f"\n☢️ [God Mode] EXECUTE HARD RESET (Time Travel Initiated) ☢️")
 
-    god_time = instance.current_mock_time
-    print(f"\n☢️☢️☢️ [God Mode] 检测到时间线跃迁至 {god_time} ☢️☢️☢️")
-    print(f"⚠️ 正在执行全量数据格式化 (重置为新账号状态)...")
+        print(f"⚠️ Clearing all trade data...")
+        Order.objects.all().delete()
+        Position.objects.all().delete()
+        DailyPerformance.objects.all().delete()
+        IntradayPerformance.objects.all().delete()
 
-    # 2. 清空所有交易数据
-    print("   >>> 正在清空订单表 (Order) ...")
-    Order.objects.all().delete()  # 会级联删除 TradeRecord
+        print(f"⚠️ Resetting user balances...")
+        default_cap = Decimal('200000.00')
 
-    print("   >>> 正在清空持仓表 (Position) ...")
-    Position.objects.all().delete()
+        # 使用 UserProfile.objects.all() 自动忽略无 Profile 的脏数据
+        for profile in UserProfile.objects.all():
+            profile.initial_capital = default_cap
+            profile.balance = default_cap
+            if hasattr(profile, 'withdrawable_cash'):
+                profile.withdrawable_cash = default_cap
 
-    print("   >>> 正在清空业绩报表 (Performance) ...")
-    DailyPerformance.objects.all().delete()
-    IntradayPerformance.objects.all().delete()
+            profile.last_market_value = 0
+            profile.last_total_assets = default_cap
+            profile.daily_profit = 0
+            profile.total_profit = 0
 
-    # 3. 重置所有用户的资产状态
-    UserProfile = apps.get_model('users', 'UserProfile')
-    print("   >>> 正在重置用户资产 (UserProfile) ...")
+            profile.save()
+            print(f"   User {profile.user.username}: Factory reset to {default_cap}")
 
-    users_profiles = UserProfile.objects.all()
-    for profile in users_profiles:
-        # 重置回初始本金
-        init_cap = profile.initial_capital
-        profile.balance = init_cap
-        profile.withdrawable_cash = init_cap
+        print(f"✅ World reset complete.\n")
 
-        # 归零收益指标
-        profile.last_market_value = 0
-        profile.last_total_assets = init_cap
-        profile.daily_profit = 0
-        profile.total_profit = 0
 
-        profile.save()
-        print(f"       User {profile.user.username}: 资产已重置为 {init_cap}")
+# ================= 8. 拆分出的代理模型 =================
+class TimeFlowSettings(SystemSettings):
+    """用于调整流速 (安全)"""
+    class Meta:
+        proxy = True  # 关键：这是一个代理模型，不创建新表
+        verbose_name = "1. 时间流速控制 (安全)"
+        verbose_name_plural = verbose_name
 
-    print(f"✅ 全量重置完成。当前是纯净的 {god_time} (新开局)。\n")
+class TimeResetSettings(SystemSettings):
+    """用于穿越时间 (危险)"""
+    class Meta:
+        proxy = True
+        verbose_name = "2. 时间穿越 & 重置 (危险)"
+        verbose_name_plural = verbose_name
