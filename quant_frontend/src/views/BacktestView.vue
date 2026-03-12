@@ -76,6 +76,14 @@
       <el-row :gutter="20" class="indicators">
         <el-col :span="6">
           <div class="indicator-item">
+            <div class="label">累计总收益率</div>
+            <div class="value" :class="resultData.total_return >= 0 ? 'up' : 'down'">
+              {{ (resultData.total_return * 100).toFixed(2) }}%
+            </div>
+          </div>
+        </el-col>
+        <el-col :span="6">
+          <div class="indicator-item">
             <div class="label">年化收益率</div>
             <div class="value" :class="resultData.annualized_return >= 0 ? 'up' : 'down'">
               {{ (resultData.annualized_return * 100).toFixed(2) }}%
@@ -97,18 +105,56 @@
       </el-row>
 
       <div ref="chartRef" class="chart-container"></div>
+
+      <el-divider>交易与持仓明细 (倒序显示)</el-divider>
+      <el-table
+        :data="reversedTradeRecords"
+        height="400"
+        border
+        stripe
+        style="width: 100%; margin-top: 20px;"
+      >
+        <el-table-column prop="date" label="交易日期" width="150" align="center" />
+        <el-table-column prop="stocks" label="当日持仓标的" align="center">
+          <template #default="scope">
+            <el-tag
+              v-if="scope.row.stocks === '空仓避险'"
+              type="danger"
+              size="small"
+            >
+              空仓避险
+            </el-tag>
+            <el-tag
+              v-else
+              v-for="stock in scope.row.stocks.split(', ')"
+              :key="stock"
+              size="small"
+              style="margin-right: 5px;"
+            >
+              {{ stock }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="daily_return" label="单日收益率" width="150" align="center">
+          <template #default="scope">
+            <span :class="scope.row.daily_return > 0 ? 'up' : (scope.row.daily_return < 0 ? 'down' : '')" style="font-weight: bold;">
+              {{ (scope.row.daily_return * 100).toFixed(2) }}%
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="equity" label="收盘总资金 (元)" width="180" align="center" />
+      </el-table>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, reactive, watch, nextTick, onBeforeUnmount, computed } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { VideoPlay } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
-// 1. 定义默认配置
 const defaultForm = {
   task_name: '动量反转混合策略',
   initial_capital: 100000,
@@ -118,19 +164,16 @@ const defaultForm = {
 }
 const defaultDateRange = ['2024-01-01', '2025-12-31']
 
-// 2. 尝试从 localStorage 读取历史配置
 const savedForm = JSON.parse(localStorage.getItem('quant_backtest_form'))
 const savedDateRange = JSON.parse(localStorage.getItem('quant_backtest_dateRange'))
 
-// 3. 初始化响应式数据（如果有历史记录则合并，并强制覆盖不可修改的 task_name）
 const form = reactive({
   ...defaultForm,
   ...(savedForm || {}),
-  task_name: defaultForm.task_name // 确保任务名一直是默认的
+  task_name: defaultForm.task_name
 })
 const dateRange = ref(savedDateRange || defaultDateRange)
 
-// 4. 使用 watch 深度监听数据变化，实时保存到 localStorage
 watch(form, (newVal) => {
   localStorage.setItem('quant_backtest_form', JSON.stringify(newVal))
 }, { deep: true })
@@ -139,18 +182,21 @@ watch(dateRange, (newVal) => {
   localStorage.setItem('quant_backtest_dateRange', JSON.stringify(newVal))
 })
 
-// 5. 恢复默认配置的方法
 const resetForm = () => {
   Object.assign(form, defaultForm)
   dateRange.value = [...defaultDateRange]
   ElMessage.success('已恢复默认配置')
 }
 
-// 以下为回测与图表渲染逻辑 (保持不变)
 const loading = ref(false)
 const resultData = ref(null)
 const chartRef = ref(null)
 let myChart = null
+
+const reversedTradeRecords = computed(() => {
+  if (!resultData.value || !resultData.value.trade_records) return []
+  return [...resultData.value.trade_records].reverse()
+})
 
 const runBacktest = async () => {
   if (!dateRange.value || dateRange.value.length !== 2) {
@@ -177,7 +223,8 @@ const runBacktest = async () => {
       ElMessage.success('分布式集群回测计算完成！')
       resultData.value = response.data.data
       nextTick(() => {
-        renderChart(resultData.value.equity_curve)
+        // 渲染图表时传入当前任务的初始资金，以便计算累计收益
+        renderChart(resultData.value.equity_curve, form.initial_capital)
       })
     } else {
       ElMessage.error(response.data.message || '回测失败')
@@ -190,7 +237,8 @@ const runBacktest = async () => {
   }
 }
 
-const renderChart = (curveData) => {
+// 🟢 修改点：接收 baseCapital 用于计算累计收益率
+const renderChart = (curveData, baseCapital) => {
   if (!chartRef.value) return
   if (myChart) myChart.dispose()
   myChart = echarts.init(chartRef.value)
@@ -202,22 +250,40 @@ const renderChart = (curveData) => {
     title: { text: '资金净值曲线', left: 'center' },
     tooltip: {
       trigger: 'axis',
+      // 🟢 修改点：自定义 formatter 以支持单日收益和累计收益的彩色展示
       formatter: function (params) {
         const date = params[0].axisValue;
         const equity = params[0].data;
         const item = curveData.find(d => d.date === date);
-        const dailyReturn = item ? (item.daily_return * 100).toFixed(2) + '%' : '--';
-        return `${date}<br/>资金净值: ${equity}<br/>单日收益: ${dailyReturn}`;
+
+        let dailyReturnStr = '--';
+        let cumReturnStr = '--';
+
+        if (item) {
+          // 单日收益及颜色控制
+          const dailyReturn = (item.daily_return * 100).toFixed(2);
+          const dailyColor = item.daily_return >= 0 ? '#f56c6c' : '#67c23a';
+          dailyReturnStr = `<span style="color: ${dailyColor}; font-weight: bold;">${dailyReturn}%</span>`;
+
+          // 累计收益及颜色控制
+          const cumReturn = (((equity - baseCapital) / baseCapital) * 100).toFixed(2);
+          const cumColor = (equity - baseCapital) >= 0 ? '#f56c6c' : '#67c23a';
+          cumReturnStr = `<span style="color: ${cumColor}; font-weight: bold;">${cumReturn}%</span>`;
+        }
+
+        return `
+          <div style="font-size: 14px; line-height: 24px;">
+            <b>${date}</b><br/>
+            资金净值: ${equity.toFixed(2)}<br/>
+            单日收益: ${dailyReturnStr}<br/>
+            累计收益: ${cumReturnStr}
+          </div>
+        `;
       }
     },
     toolbox: {
       feature: {
-        dataView: {
-          show: true,
-          readOnly: true,
-          title: '数据视图',
-          lang: ['数据视图', '关闭', '刷新']
-        },
+        dataView: { show: true, readOnly: true, title: '数据视图', lang: ['数据视图', '关闭', '刷新'] },
         restore: { show: true, title: '还原' },
         saveAsImage: { show: true, title: '下载图表' }
       }

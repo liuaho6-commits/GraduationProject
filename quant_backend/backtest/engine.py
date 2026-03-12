@@ -8,7 +8,8 @@ if not hasattr(pd.DataFrame, 'iteritems'):
     pd.DataFrame.iteritems = pd.DataFrame.items
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lag, lead, round, mean, stddev, avg, rank
+# 🟢 修复核心：引入 concat_ws 用于拼接字符串
+from pyspark.sql.functions import col, lag, lead, round, mean, stddev, avg, rank, collect_list, concat_ws
 from pyspark.sql.window import Window
 
 from stocks.models import StockData
@@ -83,9 +84,14 @@ class SparkBacktestEngine:
         rank_window = Window.partitionBy("date").orderBy(col("total_score").desc())
         ranked_df = factor_df.withColumn("rank", rank().over(rank_window))
 
+        # 🟢 修复核心：将 code 和 close(价格) 拼接在一起
         portfolio_df = ranked_df.filter(col("rank") <= top_n) \
+            .withColumn("code_price", concat_ws(":", col("code"), round(col("close"), 2))) \
             .groupBy("date") \
-            .agg(round(mean("next_return"), 4).alias("portfolio_return")) \
+            .agg(
+                round(mean("next_return"), 4).alias("portfolio_return"),
+                collect_list("code_price").alias("buy_stocks")  # 收集拼接后的结果
+            ) \
             .orderBy("date")
 
         pdf_returns = portfolio_df.toPandas()
