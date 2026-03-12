@@ -114,7 +114,7 @@ class IntradayPerformance(models.Model):
 class SystemSettings(models.Model):
     current_mock_time = models.DateTimeField(verbose_name="当前模拟时间", default=timezone.now)
     time_speed = models.FloatField(verbose_name="时间流速倍率", default=1.0)
-    skip_non_trading = models.BooleanField(verbose_name="自动跳过休市", default=False)
+    # 此处删除了 skip_non_trading 字段
     last_update_time = models.DateTimeField(auto_now=True)
 
     class Meta:

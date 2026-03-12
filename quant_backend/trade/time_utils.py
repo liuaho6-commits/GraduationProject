@@ -43,37 +43,11 @@ def set_mock_now(dt):
 
 def get_next_trading_time(current_time):
     """
-    计算下一个交易时刻 (跳过休市)
+    计算下一个交易时刻 (已移除跳过休市功能，时间将线性自然流逝)
     """
-    # 确保是 datetime 对象
     if isinstance(current_time, str):
+        import datetime
         current_time = datetime.datetime.fromisoformat(current_time)
 
-    # 1. 周末判断 (weekday: 5=周六, 6=周日)
-    if current_time.weekday() >= 5:
-        # 如果是周末，跳到下周一 09:30
-        days_ahead = 7 - current_time.weekday()  # 周六+2天，周日+1天
-        next_day = current_time + datetime.timedelta(days=days_ahead)
-        return next_day.replace(hour=9, minute=30, second=0, microsecond=0)
-
-    # 定义当日关键时间点
-    t0930 = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
-    t1130 = current_time.replace(hour=11, minute=30, second=0, microsecond=0)
-    t1300 = current_time.replace(hour=13, minute=0, second=0, microsecond=0)
-    t1500 = current_time.replace(hour=15, minute=0, second=0, microsecond=0)
-
-    # 2. 盘前 (00:00 - 09:30) -> 跳到 09:30
-    if current_time < t0930:
-        return t0930
-
-    # 3. 午休 (11:30 - 13:00) -> 跳到 13:00
-    if t1130 <= current_time < t1300:
-        return t1300
-
-    # 4. 盘后 (>= 15:00) -> 跳到次日 09:30
-    if current_time >= t1500:
-        next_day = current_time + datetime.timedelta(days=1)
-        return get_next_trading_time(next_day.replace(hour=9, minute=30, second=0))
-
-    # 交易时间，保持不变
+    # 直接返回当前时间，依靠系统的 time_speed 自然往前走，不再做任何空间跳跃
     return current_time

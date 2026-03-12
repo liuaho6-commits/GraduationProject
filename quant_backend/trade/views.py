@@ -140,24 +140,44 @@ class PerformanceView(APIView):
 
         # 🟢 场景 A: 分时图 (日内收益) - 维持实时计算 (倒推锚定法)
         if query_type == 'intraday':
-            start = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            if now < start:
+            effective_now = now
+
+            # 1. 如果当前时间早于 09:00，则退回到上一个交易日的 15:00
+            if effective_now.hour < 9:
+                effective_now -= datetime.timedelta(days=1)
+                while effective_now.weekday() >= 5:  # 跳过周末
+                    effective_now -= datetime.timedelta(days=1)
+                effective_now = effective_now.replace(hour=15, minute=0, second=0, microsecond=0)
+
+            # 2. 锚定有效当天的 09:30 为起点
+            start = effective_now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+            # 3. 如果时间超过了 15:00，将计算无情截断在 15:00
+            if effective_now.hour >= 15:
+                effective_now = effective_now.replace(hour=15, minute=0, second=0, microsecond=0)
+
+            # 处于 09:00 - 09:30 之间时，无数据，前端显示休市遮罩
+            if effective_now < start:
                 return Response({'code': 200, 'data': []})
 
-            # 1. 确定基准（昨收资产）
-            yesterday_close_time = (start - datetime.timedelta(days=1)).replace(hour=15, minute=0, second=0)
+            # 4. 确定基准（昨收资产），修复原来没考虑周末的潜在 Bug
+            prev_day = start - datetime.timedelta(days=1)
+            while prev_day.weekday() >= 5:
+                prev_day -= datetime.timedelta(days=1)
+            yesterday_close_time = prev_day.replace(hour=15, minute=0, second=0, microsecond=0)
+
             base_assets, _, _, _, _ = calculate_asset_status(user, yesterday_close_time)
             if base_assets <= 0: base_assets = initial_capital
 
-            # 2. 获取今日所有订单
+            # 5. 获取今日所有订单
             orders_today = Order.objects.filter(
                 user=user,
                 status='filled',
                 order_time__gte=start,
-                order_time__lte=now
+                order_time__lte=effective_now
             ).order_by('order_time')
 
-            # 3. 倒推计算
+            # 6. 倒推计算
             cash_change_today = Decimal('0.0')
             for o in orders_today:
                 cost = Decimal(str(o.price)) * Decimal(o.volume)
@@ -195,7 +215,7 @@ class PerformanceView(APIView):
                 minutes = StockMinuteData.objects.filter(
                     code__in=active_stocks,
                     date__gte=start,
-                    date__lte=now
+                    date__lte=effective_now
                 ).order_by('date').values('code', 'date', 'close')
 
                 for m in minutes:
@@ -209,7 +229,7 @@ class PerformanceView(APIView):
             order_idx = 0
             num_orders = len(orders_today)
 
-            while curr <= now:
+            while curr <= effective_now:
                 while order_idx < num_orders:
                     o = orders_today[order_idx]
                     o_time = o.order_time if timezone.is_aware(o.order_time) else timezone.make_aware(o.order_time)

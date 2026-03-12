@@ -20,7 +20,6 @@
             :disabled="true"
             :controls="false"
           />
-          <div class="price-hint">当前市价: ¥{{ formatPrice(latestPrice) }} (实时变动)</div>
         </el-form-item>
 
         <el-form-item label="委托数量">
@@ -78,7 +77,6 @@ const tradePrice = ref(0)
 const tradeVolume = ref(0)
 const loading = ref(false)
 
-// 监听最新价，自动更新委托价
 watch(() => props.latestPrice, (newVal) => {
   if (newVal > 0) {
     tradePrice.value = parseFloat(newVal.toFixed(2))
@@ -86,7 +84,6 @@ watch(() => props.latestPrice, (newVal) => {
   }
 })
 
-// 监听余额，尝试设置默认手数
 watch(() => props.userBalance, () => {
   trySetDefaultVolume()
 })
@@ -95,7 +92,6 @@ const formatPrice = (val) => {
   return Number(val || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-// 智能设置默认值：如果未设置数量且买得起，默认填100
 const trySetDefaultVolume = () => {
   if (tradeDirection.value === 'buy' && tradeVolume.value === 0 && props.latestPrice > 0) {
     if (props.userBalance >= props.latestPrice * 100) {
@@ -117,8 +113,6 @@ const setVolume = (ratio) => {
     }
   } else {
     const vol = Math.floor(props.userPosition * ratio / 100) * 100
-    // 全仓卖出时如果不是100倍数（比如送股产生的碎股），可能需要特殊处理，这里按100取整
-    // 如果想要卖出全部碎股，逻辑需要后端支持，这里保持原逻辑
     tradeVolume.value = (ratio === 1.0) ? props.userPosition : vol
   }
 }
@@ -130,7 +124,7 @@ const handleTrade = async () => {
   try {
     const api = axios.create({
       baseURL: 'http://127.0.0.1:8000/',
-      headers: { 'Authorization': `Token ${localStorage.getItem('token')}` }
+      headers: { 'Authorization': 'Token ' + localStorage.getItem('token') }
     })
 
     const res = await api.post('api/trade/place_order/', {
@@ -142,7 +136,7 @@ const handleTrade = async () => {
 
     if (res.data.code === 200) {
       ElMessage.success('委托提交成功')
-      emit('trade-success') // 通知父组件刷新资产
+      emit('trade-success')
     } else {
       ElMessage.error(res.data.msg || '交易失败')
     }
@@ -163,5 +157,4 @@ const handleTrade = async () => {
 .sell-btn { background-color: #67c23a; border-color: #67c23a; }
 .asset-info { margin-top: 10px; color: #666; font-size: 13px; background: #f1f5f9; padding: 8px; border-radius: 4px; }
 .text-danger { color: #f56c6c; font-weight: bold; }
-.price-hint { font-size: 12px; color: #999; margin-top: 4px; }
 </style>

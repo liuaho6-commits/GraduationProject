@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'managers',
     'trade',
     'django_apscheduler',
+    'backtest',
 ]
 
 MIDDLEWARE = [

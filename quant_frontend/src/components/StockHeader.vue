@@ -13,10 +13,6 @@
 
     <template #extra>
       <div class="header-right">
-        <div class="time-display" v-if="systemTime">
-          <el-icon><Clock /></el-icon> {{ systemTime }}
-        </div>
-
         <el-radio-group :model-value="viewMode" size="small" @change="$emit('update:viewMode', $event)">
           <el-radio-button value="min">分时</el-radio-button>
           <el-radio-button value="daily">日K</el-radio-button>
@@ -27,13 +23,12 @@
 </template>
 
 <script setup>
-import { Clock } from '@element-plus/icons-vue'
-
+// 移除了 { Clock } 图标的引入
 defineProps({
   stockName: { type: String, default: '--' },
   stockCode: { type: String, default: '' },
   viewMode: { type: String, default: 'min' },
-  systemTime: { type: String, default: '' }
+  systemTime: { type: String, default: '' } // 保留 prop 接收以免父组件传参报错
 })
 
 defineEmits(['back', 'update:viewMode'])
@@ -45,7 +40,7 @@ defineEmits(['back', 'update:viewMode'])
 .stock-title { font-size: 22px; font-weight: 700; color: #1e293b; }
 .stock-code { font-size: 14px; color: #64748b; font-weight: normal; margin-left: 6px; }
 .header-right { display: flex; align-items: center; }
-.time-display { font-family: 'Roboto Mono', monospace; font-size: 14px; color: #64748b; margin-right: 15px; display: flex; align-items: center; gap: 5px; }
+/* 移除了 time-display 相关的样式 */
 .live-tag { display: flex; align-items: center; gap: 4px; }
 .dot { width: 6px; height: 6px; background: #67c23a; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
 

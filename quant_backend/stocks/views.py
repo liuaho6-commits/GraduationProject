@@ -6,7 +6,9 @@ import datetime
 from .models import StockData, StockMinuteData, StockBasicInfo
 from .serializers import StockDataSerializer, StockMinuteDataSerializer
 from trade.time_utils import get_mock_now
-
+import warnings
+# 忽略 Django 关于 Naive datetime 的时区警告
+warnings.filterwarnings('ignore', category=RuntimeWarning, message=r'.*received a naive datetime.*')
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20

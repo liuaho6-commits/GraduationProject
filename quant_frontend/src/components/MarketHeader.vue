@@ -13,12 +13,6 @@
     </div>
 
     <div class="header-right">
-      <transition name="el-fade-in">
-        <span v-if="marketTime" class="market-time">
-          <el-icon><Clock /></el-icon> {{ marketTime }}
-        </span>
-      </transition>
-      <el-divider direction="vertical" />
       <el-button
         type="primary"
         :icon="Refresh"
@@ -32,11 +26,10 @@
 </template>
 
 <script setup>
-import { Clock, Refresh } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 
 defineProps({
-  activeTab: { type: String, required: true },
-  marketTime: { type: String, default: '' }
+  activeTab: { type: String, required: true }
 })
 
 defineEmits(['update:activeTab', 'tab-change', 'refresh'])
@@ -45,15 +38,4 @@ defineEmits(['update:activeTab', 'tab-change', 'refresh'])
 <style scoped>
 .header-row { display: flex; justify-content: space-between; align-items: center; padding-bottom: 2px; }
 .header-right { display: flex; align-items: center; gap: 12px; }
-.market-time {
-    font-size: 13px;
-    color: #64748b;
-    font-family: 'Roboto Mono', monospace;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: #f1f5f9;
-    padding: 4px 10px;
-    border-radius: 6px;
-}
 </style>

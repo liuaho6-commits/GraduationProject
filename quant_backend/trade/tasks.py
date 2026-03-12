@@ -34,11 +34,8 @@ def clock_tick():
             print(f"🏁 [Settlement] Daily settlement for {now.date()}...")
             record_daily_performance()
 
-        # 跳过休市
-        if settings.skip_non_trading:
-            valid_time = get_next_trading_time(new_time)
-        else:
-            valid_time = new_time
+        # 🔴 修复点：移除了 settings.skip_non_trading 的判断逻辑，直接使用计算出的新时间
+        valid_time = new_time
 
         # 更新时间 (使用 update 不会触发 save/重置)
         SystemSettings.objects.filter(id=settings.id).update(current_mock_time=valid_time)

@@ -5,7 +5,7 @@ import DashboardView from '../views/DashboardView.vue'
 import MarketView from '../views/MarketView.vue'
 import StockDetailView from '../views/StockDetailView.vue' // 🟢 引入详情页
 import MainLayout from '../layout/MainLayout.vue'
-
+import BacktestView from '../views/BacktestView.vue' // 🟢 1. 引入新页面
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
@@ -39,6 +39,11 @@ const router = createRouter({
           path: 'stock/:code',
           name: 'stock-detail',
           component: StockDetailView
+        },
+        {
+          path: 'backtest',
+          name: 'backtest',
+          component: BacktestView
         }
       ]
     }

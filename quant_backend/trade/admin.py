@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.contrib import messages  # <--- 修复了这里的报错
+from django.contrib import messages
 from .models import (
     Strategy, Position, Order, TradeRecord,
     SystemSettings, DailyPerformance, IntradayPerformance,
@@ -40,9 +40,9 @@ class IntradayPerformanceAdmin(admin.ModelAdmin):
 # ================= 1. 流速控制页面 (普通保存) =================
 @admin.register(TimeFlowSettings)
 class TimeFlowSettingsAdmin(admin.ModelAdmin):
-    # 只显示流速相关字段
-    fields = ('time_speed', 'skip_non_trading')
-    list_display = ('time_speed', 'skip_non_trading', 'current_mock_time')
+    # 只显示流速相关字段 (已删除 skip_non_trading)
+    fields = ('time_speed',)
+    list_display = ('time_speed', 'current_mock_time')
 
     def has_add_permission(self, request):
         # 禁止创建多条记录，始终只允许修改现有的
@@ -68,7 +68,7 @@ class TimeResetSettingsAdmin(admin.ModelAdmin):
         # 直接调用你在 models.py 里写好的核弹重置方法
         obj.hard_reset_world()
 
-        # 3. 给管理员弹个窗提示 (现在 messages 已正确导入)
+        # 3. 给管理员弹个窗提示
         messages.set_level(request, messages.WARNING)
         messages.warning(request, f"🚀 穿越成功！时间已跃迁至 {obj.current_mock_time}，所有持仓和资金已重置！")
 
@@ -77,7 +77,3 @@ class TimeResetSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
-
-
-# 注销原始入口，避免混淆
-#admin.site.unregister(SystemSettings)

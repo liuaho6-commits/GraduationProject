@@ -6,22 +6,27 @@
         <span>QuantTrader</span>
       </div>
       <el-menu
-        :default-active="activeMenu"
-        class="el-menu-vertical"
-        background-color="#304156"
-        text-color="#bfcbd9"
-        active-text-color="#409EFF"
-        router
-      >
-        <el-menu-item index="/dashboard">
-          <el-icon><Odometer /></el-icon>
-          <span>仪表盘</span>
-        </el-menu-item>
-        <el-menu-item index="/market">
-          <el-icon><DataLine /></el-icon>
-          <span>行情中心</span>
-        </el-menu-item>
-        </el-menu>
+  :default-active="activeMenu"
+  class="el-menu-vertical"
+  background-color="#304156"
+  text-color="#bfcbd9"
+  active-text-color="#409EFF"
+  router
+>
+  <el-menu-item index="/dashboard">
+    <el-icon><Odometer /></el-icon>
+    <span>仪表盘</span>
+  </el-menu-item>
+  <el-menu-item index="/market">
+    <el-icon><DataLine /></el-icon>
+    <span>行情中心</span>
+  </el-menu-item>
+
+  <el-menu-item index="/backtest">
+    <el-icon><Monitor /></el-icon>
+    <span>量化回测</span>
+  </el-menu-item>
+</el-menu>
     </el-aside>
 
     <el-container>
