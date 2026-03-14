@@ -11,6 +11,8 @@
       <PerformanceChart :user-data="userData"/>
     </div>
 
+    <MyStrategies />
+
     <PositionList ref="positionListRef"/>
 
     <div className="table-section">
@@ -39,6 +41,8 @@ import RecentOrders from '../components/RecentOrders.vue'
 import BankTransferDialog from '../components/BankTransferDialog.vue'
 import PerformanceChart from '../components/PerformanceChart.vue'
 import PositionList from '../components/PositionList.vue'
+// 🟢 引入策略组件
+import MyStrategies from '../components/MyStrategies.vue'
 
 const router = useRouter()
 const loading = ref(true)

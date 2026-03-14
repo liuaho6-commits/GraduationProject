@@ -120,6 +120,7 @@ def calculate_asset_status(user, target_time):
 
 
 # ================= 收益表现 (混合模式：日线查库/分时实时) =================
+# ================= 收益表现 (混合模式：日线查库/分时实时) =================
 class PerformanceView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -130,6 +131,7 @@ class PerformanceView(APIView):
 
         user = request.user
         UserProfile = apps.get_model('users', 'UserProfile')
+        DailyPerformance = apps.get_model('trade', 'DailyPerformance')
 
         # 强制获取最新状态
         profile = UserProfile.objects.get(user=user)
@@ -149,6 +151,21 @@ class PerformanceView(APIView):
                     effective_now -= datetime.timedelta(days=1)
                 effective_now = effective_now.replace(hour=15, minute=0, second=0, microsecond=0)
 
+            # 🟢 核心修复：基于数据库事实的节假日/非交易日终极判定！
+            day_start = effective_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = effective_now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+            # 去数据库看看今天到底有没有产生 5 分钟线数据
+            has_market_data = StockMinuteData.objects.filter(
+                date__gte=day_start,
+                date__lte=day_end
+            ).exists()
+
+            if not has_market_data:
+                # 只要数据库没数据，不管今天是周几，绝对是休市日/节假日！
+                # 直接返回空数组，前端收到后会自动停止画线并开启遮罩
+                return Response({'code': 200, 'data': []})
+
             # 2. 锚定有效当天的 09:30 为起点
             start = effective_now.replace(hour=9, minute=30, second=0, microsecond=0)
 
@@ -160,14 +177,15 @@ class PerformanceView(APIView):
             if effective_now < start:
                 return Response({'code': 200, 'data': []})
 
-            # 4. 确定基准（昨收资产），修复原来没考虑周末的潜在 Bug
-            prev_day = start - datetime.timedelta(days=1)
-            while prev_day.weekday() >= 5:
-                prev_day -= datetime.timedelta(days=1)
-            yesterday_close_time = prev_day.replace(hour=15, minute=0, second=0, microsecond=0)
+            # 4. 确定基准（昨收资产）：坚决和 UserInfoView (顶部卡片) 保持同一个数据源！
+            yesterday_perf = DailyPerformance.objects.filter(
+                user=user, date__lt=now.date()
+            ).order_by('-date').first()
 
-            base_assets, _, _, _, _ = calculate_asset_status(user, yesterday_close_time)
-            if base_assets <= 0: base_assets = initial_capital
+            if yesterday_perf:
+                base_assets = Decimal(str(yesterday_perf.total_assets))
+            else:
+                base_assets = initial_capital
 
             # 5. 获取今日所有订单
             orders_today = Order.objects.filter(
@@ -270,9 +288,24 @@ class PerformanceView(APIView):
                 if curr.hour == 11 and curr.minute > 30:
                     curr = curr.replace(hour=13, minute=0)
 
-        # 🟢 场景 B: 日线图 (修正版：直接查库 + 补今日)
+            # 强制缝合当前最新点
+            profile.update_asset_cache()
+            final_profit = profile.last_total_assets - base_assets
+            final_rate = (final_profit / base_assets * 100) if base_assets > 0 else 0
+
+            current_time_str = effective_now.strftime('%H:%M')
+            if data and data[-1]['time'] == current_time_str:
+                data[-1]['profit'] = round(float(final_profit), 2)
+                data[-1]['total_return_rate'] = round(float(final_rate), 2)
+            else:
+                data.append({
+                    'time': current_time_str,
+                    'total_return_rate': round(float(final_rate), 2),
+                    'profit': round(float(final_profit), 2)
+                })
+
+        # 🟢 场景 B: 日线图
         else:
-            # 1. 直接查询 DailyPerformance 表 (极速)
             history = DailyPerformance.objects.filter(user=user).order_by('date')
 
             for h in history:
@@ -280,18 +313,16 @@ class PerformanceView(APIView):
 
                 data.append({
                     'date': h.date.strftime('%Y-%m-%d'),
-                    'total_return_rate': round(h.total_return_rate, 2),  # 信赖数据库存的收益率
+                    'total_return_rate': round(h.total_return_rate, 2),
                     'profit': round(profit_calc, 2),
                     'day_profit': round(float(h.day_profit), 2),
                     'total_assets': round(float(h.total_assets), 2)
                 })
 
-            # 2. 检查列表里是否有“今天”的数据
             today_str = now.date().strftime('%Y-%m-%d')
             has_today = any(d['date'] == today_str for d in data)
 
             if not has_today:
-                # 实时计算当前的资产状态
                 assets, _, _, _, _ = calculate_asset_status(request.user, now)
 
                 total_profit = assets - initial_capital
@@ -309,7 +340,6 @@ class PerformanceView(APIView):
                 })
 
         return Response({'code': 200, 'data': data})
-
 
 # ================= 资金划转 =================
 class FundTransferView(APIView):
@@ -334,13 +364,61 @@ class FundTransferView(APIView):
 
 
 # ================= 其他视图 =================
+# ================= 策略管理接口 =================
 class StrategyView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        strats = Strategy.objects.filter(user=request.user)
+        """获取用户的策略列表"""
+        strats = Strategy.objects.filter(user=request.user).order_by('-create_time')
         return Response({'code': 200, 'data': StrategySerializer(strats, many=True).data})
 
+    def post(self, request):
+        """创建或修改策略 (包含启动/停止状态切换)"""
+        data = request.data
+        strategy_id = data.get('id')
+
+        try:
+            if strategy_id:
+                # 1. 更新已存在的策略 (例如前端点击了"启动"或"停止")
+                strategy = Strategy.objects.get(id=strategy_id, user=request.user)
+                if 'status' in data:
+                    strategy.status = data['status']
+                if 'code' in data:
+                    strategy.code = data['code']
+                if 'stock_pool' in data:
+                    strategy.stock_pool = data['stock_pool']
+                if 'name' in data:
+                    strategy.name = data['name']
+                strategy.save()
+                return Response({'code': 200, 'msg': f'策略 [{strategy.name}] 更新成功'})
+            else:
+                # 2. 创建新策略
+                strategy = Strategy.objects.create(
+                    user=request.user,
+                    name=data.get('name', '新建量化策略'),
+                    code=data.get('code', ''),
+                    stock_pool=data.get('stock_pool', ''),
+                    status='stopped'  # 默认停止，防止意外运行
+                )
+                return Response({'code': 200, 'msg': '策略创建成功', 'data': {'id': strategy.id}})
+
+        except Strategy.DoesNotExist:
+            return Response({'code': 404, 'msg': '策略不存在或无权操作'})
+        except Exception as e:
+            return Response({'code': 500, 'msg': f'策略操作失败: {str(e)}'})
+
+    def delete(self, request):
+        """删除策略"""
+        strategy_id = request.data.get('id') or request.query_params.get('id')
+        if not strategy_id:
+            return Response({'code': 400, 'msg': '缺少策略 ID'})
+        try:
+            strategy = Strategy.objects.get(id=strategy_id, user=request.user)
+            strategy.delete()
+            return Response({'code': 200, 'msg': '策略已删除'})
+        except Strategy.DoesNotExist:
+            return Response({'code': 404, 'msg': '策略不存在'})
 
 class OrderListView(APIView):
     permission_classes = [IsAuthenticated]

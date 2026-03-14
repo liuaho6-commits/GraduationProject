@@ -75,7 +75,7 @@ const fetchData = async () => {
     if (res.data.code === 200) {
       const data = res.data.data || []
 
-      // 核心拦截逻辑：如果数据为空，触发休市遮罩
+      // 🟢 极简判定：后端根据数据库查明今天没有 5分钟线 数据，传回空数组，直接休市！
       if (data.length === 0) {
         isHoliday.value = true
         return
@@ -106,7 +106,7 @@ const fetchData = async () => {
 onMounted(() => {
   initChart()
   fetchData()
-  timer = setInterval(fetchData, 1000)
+  timer = setInterval(fetchData, 2000)
 })
 
 onUnmounted(() => {

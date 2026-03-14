@@ -1,58 +1,63 @@
 import os
 import django
+from decimal import Decimal
 
-# 初始化 Django 环境
+# 设置 Django 环境
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'quant_backend.settings')
 django.setup()
 
-from trade.models import SystemSettings, Strategy
-from stocks.models import StockData
+from users.models import UserProfile
+from trade.models import DailyPerformance
+from trade.time_utils import get_mock_now
 
 
-def run_prep():
-    print("=" * 50)
-    print("【第一步】读取核心调度任务 trade/tasks.py 的源码")
-    print("=" * 50)
-    try:
-        # 读取 tasks.py 看看目前的时钟 tick 是怎么写的
-        with open('trade/tasks.py', 'r', encoding='utf-8') as f:
-            print(f.read()[:1500])  # 打印前1500个字符足够看清逻辑
-    except Exception as e:
-        print(f"读取失败: {e}")
+def run_debug():
+    print("============== 🔍 仪表盘数据分裂追踪 ==============")
+    profile = UserProfile.objects.first()
+    if not profile:
+        print("❌ 找不到用户，请先注册/登录并初始化资产！")
+        return
 
-    print("\n" + "=" * 50)
-    print("【第二步】检查上帝视角：时间系统与真实数据的对齐情况")
-    print("=" * 50)
-    try:
-        settings = SystemSettings.get_settings()
-        print(f"1. 当前系统模拟时间 (Mock Time): {settings.current_mock_time}")
-        print(f"2. 当前时间流速倍率 (Time Speed): {settings.time_speed}x")
+    user = profile.user
+    now = get_mock_now()
 
-        latest_stock = StockData.objects.order_by('-date').first()
-        oldest_stock = StockData.objects.order_by('date').first()
-        if latest_stock and oldest_stock:
-            print(f"3. 股票日线数据区间: {oldest_stock.date} 至 {latest_stock.date}")
-        else:
-            print("3. ⚠️ 数据库中尚未发现日线股票数据！")
-    except Exception as e:
-        print(f"系统设置读取异常: {e}")
+    # 强制刷新一次最新的总资产 (和前端请求 UserInfoView 一样)
+    profile.update_asset_cache()
 
-    print("\n" + "=" * 50)
-    print("【第三步】检查现存的量化策略")
-    print("=" * 50)
-    try:
-        strategies = Strategy.objects.all()
-        print(f"当前数据库中共有 {strategies.count()} 个策略")
-        for s in strategies:
-            print(f" -> ID: {s.id} | 名称: {s.name} | 状态: {s.status} | 用户: {s.user.username}")
-            print(f"    股票池: {s.stock_pool}")
-            if s.code:
-                print(f"    策略代码前缀: {s.code[:50].replace(chr(10), ' ')}...")
-    except Exception as e:
-        print(f"策略读取异常: {e}")
+    # 1. 获取当前 UserProfile 里存的、准备发给顶部卡片的数据
+    stored_daily_profit = profile.daily_profit
 
-    print("\n>>> 探测完成，请将以上输出完整发给 AI <<<")
+    # 2. 模拟前端底层曲线图表的逻辑，推算今日真实物理收益
+    yesterday_perf = DailyPerformance.objects.filter(
+        user=user, date__lt=now.date()
+    ).order_by('-date').first()
+
+    if yesterday_perf:
+        base_assets = yesterday_perf.total_assets
+        print(f"✅ 找到上个交易日({yesterday_perf.date})结算资产基准: ￥{base_assets:.2f}")
+    else:
+        base_assets = profile.initial_capital
+        print(f"⚠️ 未找到历史结算记录，使用初始资金基准: ￥{base_assets:.2f}")
+
+    current_assets = profile.last_total_assets
+    real_daily_profit = current_assets - base_assets
+
+    print("\n📊 核心数据对峙:")
+    print(f"  [现在的总资产]: ￥{current_assets:.2f}")
+    print(f"  [对比基准资产]: ￥{base_assets:.2f}")
+    print("-" * 40)
+    print(f"  ❌ 顶部卡片读取的缓存收益 (UserProfile): ￥{stored_daily_profit:.2f}")
+    print(f"  ✅ 曲线图表计算的实时真实收益: ￥{real_daily_profit:.2f}")
+
+    if abs(stored_daily_profit - real_daily_profit) > 0.01:
+        print("\n🚨 铁证如山！抓到 Bug 了！数据确实分裂了！")
+        print("🕵️‍♂️ 破案分析：")
+        print("你的系统是高频跳动的，引擎买卖股票导致 `last_total_assets` 实时变化。")
+        print("下方的图表很聪明，它每次都用现在的总资产减去昨天的去算实时收益。")
+        print("但最顶部的卡片读的 `daily_profit` 字段是个死木头，它没有实时更新！")
+    else:
+        print("\n✅ 数据一致，此时并未发生分裂。你可以去前端下几笔单子再运行本脚本测试。")
 
 
 if __name__ == '__main__':
-    run_prep()
+    run_debug()

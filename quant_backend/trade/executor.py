@@ -1,17 +1,18 @@
+import json
 import logging
-import traceback
-import sys
-from io import StringIO
+import numpy as np
 from decimal import Decimal
 from django.utils import timezone
-from .models import Order, Position
+from .models import Position
+from stocks.models import StockData
+from .time_utils import get_mock_now
 
 logger = logging.getLogger(__name__)
 
 
 class StrategyExecutor:
     """
-    策略执行器：负责运行单个策略的 Python 代码
+    多因子实盘执行器：读取因子权重 -> 矩阵打分 -> 自动生成调仓信号
     """
 
     def __init__(self, strategy, user_profile, market_data_dict):
@@ -21,93 +22,127 @@ class StrategyExecutor:
         self.market_data_dict = market_data_dict  # 当前所有股票的最新价 {code: price}
         self.generated_orders = []  # 本次运行产生的订单缓存
         self.logs = []  # 运行日志
+        self.current_time = get_mock_now()
 
     def log(self, msg):
-        """注入给策略的 log 函数"""
         log_entry = f"[{timezone.now().strftime('%H:%M:%S')}] {msg}"
         self.logs.append(log_entry)
-        # 也可以选择存入数据库或打印到控制台
         print(f"Strategy[{self.strategy.name}]: {msg}")
 
-    def get_price(self, code):
-        """注入给策略的 get_price 函数"""
-        return self.market_data_dict.get(code, 0.0)
-
     def get_pool(self):
-        """注入给策略的 get_pool 函数"""
         if not self.strategy.stock_pool:
             return []
-        # 处理中文或英文逗号
         pool = self.strategy.stock_pool.replace('，', ',')
         return [x.strip() for x in pool.split(',') if x.strip()]
 
-    def buy(self, code, volume):
-        """注入给策略的 buy 函数"""
-        price = self.get_price(code)
-        if price <= 0:
-            self.log(f"错误: 股票 {code} 无最新价格，无法买入")
-            return
-
-        cost = Decimal(str(price)) * Decimal(volume)
-        # 简单预校验：检查余额是否足够 (模拟盘暂不计算手续费，或者之后在 Engine 层统一算)
-        if self.user_profile.balance < cost:
-            self.log(f"资金不足: 需 {cost:.2f}, 只有 {self.user_profile.balance:.2f}, 无法买入 {code}")
-            return
-
-        # 生成待处理订单 (暂不存库，等 Engine 统一处理)
-        self.generated_orders.append({
-            'direction': 'buy',
-            'code': code,
-            'price': price,
-            'volume': int(volume)
-        })
-        self.log(f"生成买单: {code} {volume}股 @ {price:.2f}")
-
-    def sell(self, code, volume):
-        """注入给策略的 sell 函数"""
-        # 查持仓
-        position = Position.objects.filter(user=self.user, stock_code=code).first()
-        if not position or position.volume < volume:
-            self.log(f"持仓不足: {code} 现有 {position.volume if position else 0}, 欲卖 {volume}")
-            return
-
-        price = self.get_price(code)
-        self.generated_orders.append({
-            'direction': 'sell',
-            'code': code,
-            'price': price,
-            'volume': int(volume)
-        })
-        self.log(f"生成卖单: {code} {volume}股 @ {price:.2f}")
-
     def execute(self):
-        """核心方法：执行用户代码"""
-        code_str = self.strategy.code
-
-        # 1. 准备全局上下文 (注入函数)
-        scope = {
-            'get_price': self.get_price,
-            'get_pool': self.get_pool,
-            'buy': self.buy,
-            'sell': self.sell,
-            'log': self.log,
-            'context': {}  # 可供用户存临时变量
-        }
-
+        """核心方法：基于多因子权重进行截面打分并调仓"""
         try:
-            # 2. 编译并执行代码
-            # 注意：exec 在生产环境有安全风险，毕设或内网项目通常可以接受
-            exec(code_str, scope)
-
-            # 3. 调用入口函数 handle_bar
-            if 'handle_bar' in scope:
-                scope['handle_bar']()
-            else:
-                self.log("错误: 策略代码中未找到 handle_bar() 函数")
-
+            # 1. 解析因子参数 (复用 code 字段存储 JSON 格式的权重)
+            config = json.loads(self.strategy.code)
+            weight_mom = float(config.get('weight_mom', 0.5))
+            weight_bias = float(config.get('weight_bias', 0.5))
+            top_n = int(config.get('top_n', 2))
         except Exception as e:
-            error_msg = traceback.format_exc()
-            self.log(f"策略运行异常: {e}")
-            logger.error(f"Strategy {self.strategy.id} Error: {error_msg}")
+            self.log(f"策略参数解析失败，请检查配置格式: {e}")
+            return []
+
+        stock_pool = self.get_pool()
+        if not stock_pool:
+            self.log("股票池为空，无法执行调仓。")
+            return []
+
+        self.log(f"启动多因子评估 | 动量:{weight_mom} 偏离:{weight_bias} 选股数:Top{top_n}")
+
+        # 2. 计算每只股票的当日因子暴露度 (Factor Exposure)
+        factor_data = []
+        for code in stock_pool:
+            # 获取包含今天在内的过去 6 天数据（用于计算 MA5 和 动量）
+            bars = list(StockData.objects.filter(
+                code=code,
+                date__lte=self.current_time.date()
+            ).order_by('-date')[:6])
+
+            if len(bars) < 6:
+                continue  # 数据不足无法计算
+
+            close_0 = bars[0].close  # 今日最新价
+            close_1 = bars[1].close  # 昨日收盘价
+            ma5 = sum(b.close for b in bars[:5]) / 5
+
+            # 因子定义 (与回测引擎保持严格一致)
+            momentum = (close_0 - close_1) / close_1 if close_1 else 0
+            bias = (close_0 - ma5) / ma5 if ma5 else 0
+
+            factor_data.append({
+                'code': code,
+                'price': close_0,
+                'momentum': momentum,
+                'bias': bias
+            })
+
+        if not factor_data:
+            self.log("有效因子数据不足。")
+            return []
+
+        # 3. 截面标准化 (Z-Score) - 矩阵优化核心
+        mom_array = np.array([x['momentum'] for x in factor_data])
+        bias_array = np.array([x['bias'] for x in factor_data])
+
+        mom_mean, mom_std = np.mean(mom_array), np.std(mom_array) + 1e-6
+        bias_mean, bias_std = np.mean(bias_array), np.std(bias_array) + 1e-6
+
+        # 4. 综合打分排序
+        for item in factor_data:
+            z_mom = (item['momentum'] - mom_mean) / mom_std
+            z_bias = (item['bias'] - bias_mean) / bias_std
+            item['total_score'] = z_mom * weight_mom + z_bias * weight_bias
+
+        # 降序排列，选出分数最高的 top_n
+        factor_data.sort(key=lambda x: x['total_score'], reverse=True)
+        target_stocks = factor_data[:top_n]
+        target_codes = [x['code'] for x in target_stocks]
+
+        self.log(f"今日多因子优选标的: {target_codes}")
+
+        # ================= 调仓逻辑 =================
+
+        # 5. 卖出逻辑：持仓中不在 target_codes 里的全部清仓
+        current_positions = Position.objects.filter(user=self.user, volume__gt=0)
+        for pos in current_positions:
+            if pos.stock_code not in target_codes:
+                self.log(f"因子轮动：准备卖出淘汰标的 {pos.stock_code}")
+                self.generated_orders.append({
+                    'direction': 'sell',
+                    'code': pos.stock_code,
+                    'price': self.market_data_dict.get(pos.stock_code, pos.avg_price),
+                    'volume': pos.volume
+                })
+
+        # 计算现有资产总额（用于等权重分配资金）
+        # 简单起见，假设卖出后能拿到全额现金
+        total_cash = float(self.user_profile.balance)
+        cash_per_stock = total_cash / top_n if top_n > 0 else 0
+
+        # 6. 买入逻辑：买入 target_codes 中的标的
+        for target in target_stocks:
+            code = target['code']
+            price = target['price']
+
+            # 检查是否已经持有
+            has_pos = any(p.stock_code == code for p in current_positions)
+            if not has_pos and price > 0:
+                # 按分配的资金计算可买股数 (向下取整到 100 股的整数倍)
+                max_shares = int(cash_per_stock / price)
+                buy_volume = (max_shares // 100) * 100
+
+                if buy_volume > 0:
+                    self.log(f"因子轮动：准备买入入选标的 {code} {buy_volume}股")
+                    self.generated_orders.append({
+                        'direction': 'buy',
+                        'code': code,
+                        'price': price,
+                        'volume': buy_volume
+                    })
 
         return self.generated_orders

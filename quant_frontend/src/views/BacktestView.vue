@@ -12,7 +12,7 @@
         <el-row :gutter="20">
           <el-col :span="8">
             <el-form-item label="任务名称">
-              <el-input v-model="form.task_name" disabled placeholder="请输入任务名称" />
+              <el-input v-model="form.task_name" placeholder="请输入任务名称" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -106,15 +106,24 @@
 
       <div ref="chartRef" class="chart-container"></div>
 
-      <el-divider>交易与持仓明细 (倒序显示)</el-divider>
+      <div style="text-align: center; margin-top: 20px; margin-bottom: 20px;">
+        <el-button type="success" size="large" @click="deployToRealTrade">
+          <el-icon style="margin-right: 8px;"><Position /></el-icon>
+          一键部署为实盘多因子策略
+        </el-button>
+      </div>
+
+      <el-divider>交易与持仓明细 (可点击表头按日期排序)</el-divider>
+
       <el-table
-        :data="reversedTradeRecords"
+        :data="resultData.trade_records"
         height="400"
         border
         stripe
         style="width: 100%; margin-top: 20px;"
+        :default-sort="{ prop: 'date', order: 'descending' }"
       >
-        <el-table-column prop="date" label="交易日期" width="150" align="center" />
+        <el-table-column prop="date" label="交易日期" width="150" align="center" sortable />
         <el-table-column prop="stocks" label="当日持仓标的" align="center">
           <template #default="scope">
             <el-tag
@@ -149,11 +158,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, nextTick, onBeforeUnmount, computed } from 'vue'
+import { ref, reactive, watch, nextTick, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
-import { VideoPlay } from '@element-plus/icons-vue'
+import { VideoPlay, Position } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
 
 const defaultForm = {
   task_name: '动量反转混合策略',
@@ -193,10 +205,7 @@ const resultData = ref(null)
 const chartRef = ref(null)
 let myChart = null
 
-const reversedTradeRecords = computed(() => {
-  if (!resultData.value || !resultData.value.trade_records) return []
-  return [...resultData.value.trade_records].reverse()
-})
+// 🟢 这里删除了之前那个产生错觉的 reversedTradeRecords computed 属性
 
 const runBacktest = async () => {
   if (!dateRange.value || dateRange.value.length !== 2) {
@@ -223,7 +232,6 @@ const runBacktest = async () => {
       ElMessage.success('分布式集群回测计算完成！')
       resultData.value = response.data.data
       nextTick(() => {
-        // 渲染图表时传入当前任务的初始资金，以便计算累计收益
         renderChart(resultData.value.equity_curve, form.initial_capital)
       })
     } else {
@@ -237,7 +245,44 @@ const runBacktest = async () => {
   }
 }
 
-// 🟢 修改点：接收 baseCapital 用于计算累计收益率
+// 一键部署为实盘策略方法
+const deployToRealTrade = async () => {
+  try {
+    const api = axios.create({
+      baseURL: 'http://127.0.0.1:8000/',
+      headers: { 'Authorization': 'Token ' + localStorage.getItem('token') }
+    })
+
+    // 把多因子权重配置打包成 JSON 字符串
+    const strategyConfig = JSON.stringify({
+      weight_mom: form.weight_mom,
+      weight_bias: form.weight_bias,
+      top_n: form.top_n
+    })
+
+    const payload = {
+      name: form.task_name + ' (实盘)',
+      stock_pool: 'sz.300394', // 默认填入一个测试股票，可以在面板中修改
+      code: strategyConfig,
+      status: 'active' // 部署后直接激活
+    }
+
+    const res = await api.post('api/trade/strategy/', payload)
+
+    if (res.data.code === 200) {
+      ElMessage.success('实盘部署成功！策略引擎将在开/尾盘时自动执行因子选股。')
+      // 部署成功后，自动跳转回 Dashboard 查看
+      setTimeout(() => {
+        router.push('/dashboard')
+      }, 1500)
+    } else {
+      ElMessage.error(res.data.msg || '部署失败')
+    }
+  } catch (error) {
+    ElMessage.error('网络错误，部署失败')
+  }
+}
+
 const renderChart = (curveData, baseCapital) => {
   if (!chartRef.value) return
   if (myChart) myChart.dispose()
@@ -250,7 +295,6 @@ const renderChart = (curveData, baseCapital) => {
     title: { text: '资金净值曲线', left: 'center' },
     tooltip: {
       trigger: 'axis',
-      // 🟢 修改点：自定义 formatter 以支持单日收益和累计收益的彩色展示
       formatter: function (params) {
         const date = params[0].axisValue;
         const equity = params[0].data;
@@ -260,12 +304,10 @@ const renderChart = (curveData, baseCapital) => {
         let cumReturnStr = '--';
 
         if (item) {
-          // 单日收益及颜色控制
           const dailyReturn = (item.daily_return * 100).toFixed(2);
           const dailyColor = item.daily_return >= 0 ? '#f56c6c' : '#67c23a';
           dailyReturnStr = `<span style="color: ${dailyColor}; font-weight: bold;">${dailyReturn}%</span>`;
 
-          // 累计收益及颜色控制
           const cumReturn = (((equity - baseCapital) / baseCapital) * 100).toFixed(2);
           const cumColor = (equity - baseCapital) >= 0 ? '#f56c6c' : '#67c23a';
           cumReturnStr = `<span style="color: ${cumColor}; font-weight: bold;">${cumReturn}%</span>`;
