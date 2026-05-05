@@ -109,13 +109,17 @@ class TradingEngine:
                     price = Decimal(str(order_data['price']))
                     volume = int(order_data['volume'])
                     amount = price * volume
+                    fee_rate = Decimal(str(order_data.get('fee_rate', 0.0001)))
+                    min_fee = Decimal(str(order_data.get('min_fee', 0)))
+                    fee = max(amount * fee_rate, min_fee)
 
                     if direction == 'buy':
-                        if profile.balance < amount:
+                        total_cost = amount + fee
+                        if profile.balance < total_cost:
                             executor.log(f"实盘撮合失败: 账户可用资金不足，无法买入 {code} {volume}股")
                             continue
 
-                        profile.balance -= amount
+                        profile.balance -= total_cost
                         profile.save()
 
                         pos, _ = Position.objects.select_for_update().get_or_create(
@@ -124,9 +128,9 @@ class TradingEngine:
                             defaults={'volume': 0, 'avg_price': 0.0, 'frozen_volume': 0}
                         )
 
-                        total_cost = Decimal(str(pos.avg_price)) * pos.volume + amount
+                        total_position_cost = Decimal(str(pos.avg_price)) * pos.volume + amount
                         pos.volume += volume
-                        pos.avg_price = float(total_cost / pos.volume)
+                        pos.avg_price = float(total_position_cost / pos.volume)
                         pos.save()
 
                     elif direction == 'sell':
@@ -144,7 +148,7 @@ class TradingEngine:
                             pos.avg_price = 0.0
                         pos.save()
 
-                        profile.balance += amount
+                        profile.balance += amount - fee
                         profile.save()
 
                     new_order = Order.objects.create(
@@ -164,11 +168,11 @@ class TradingEngine:
                         price=float(price),
                         volume=volume,
                         amount=float(amount),
-                        fee=0.0,
+                        fee=float(fee),
                         trade_time=current_time
                     )
 
-                    executor.log(f"撮合成交成功: {direction.upper()} {code} {volume}股 @ ￥{price:.2f}")
+                    executor.log(f"撮合成交成功: {direction.upper()} {code} {volume}股 @ ￥{price:.2f} | 费 ￥{fee:.2f}")
 
         except Exception as e:
             logger.error(f"Strategy {strategy.id} execution failed: {e}")

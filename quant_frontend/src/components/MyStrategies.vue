@@ -19,9 +19,8 @@
       <el-table-column label="多因子参数" width="220" align="center">
         <template #default="scope">
           <div style="font-size: 12px; line-height: 1.5; text-align: left; display: inline-block;">
-            动量权重: {{ parseConfig(scope.row.code).weight_mom }}<br/>
-            偏离权重: {{ parseConfig(scope.row.code).weight_bias }}<br/>
-            选股Top: {{ parseConfig(scope.row.code).top_n }}
+            调仓: 每日 Top {{ parseConfig(scope.row.code).top_n }}<br/>
+            启用因子: {{ enabledFactorCount(parseConfig(scope.row.code).factors) }} 个
           </div>
         </template>
       </el-table-column>
@@ -93,19 +92,71 @@
           </div>
         </el-form-item>
 
-        <el-divider>多因子权重配置 (矩阵 Z-Score)</el-divider>
+        <el-divider>每日选股策略控制</el-divider>
 
-        <el-form-item label="动量因子权重">
-          <el-slider v-model="currentStrategy.weight_mom" :min="-1" :max="1" :step="0.1" show-input />
+        <el-form-item label="策略模板">
+          <el-select v-model="currentStrategy.preset_code" style="width: 100%" @change="applyStrategyPreset">
+            <el-option
+              v-for="preset in STRATEGY_PRESETS"
+              :key="preset.code"
+              :label="preset.name"
+              :value="preset.code"
+            />
+          </el-select>
         </el-form-item>
 
-        <el-form-item label="均线偏离权重">
-          <el-slider v-model="currentStrategy.weight_bias" :min="-1" :max="1" :step="0.1" show-input />
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="目标持仓数">
+              <el-input-number v-model="currentStrategy.top_n" :min="1" :max="20" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="允许空仓">
+              <el-switch v-model="currentStrategy.allow_cash" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="买入阈值">
+              <el-input-number v-model="currentStrategy.buy_threshold" :min="-5" :max="5" :step="0.1" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-form-item label="手续费">
+          <div class="fee-text">万一免五：成交额 0.01%，最低 0 元</div>
         </el-form-item>
 
-        <el-form-item label="每日选股数 (Top N)">
-          <el-input-number v-model="currentStrategy.top_n" :min="1" :max="20" />
-        </el-form-item>
+        <el-divider>内置因子权重</el-divider>
+
+        <el-table :data="currentStrategy.factors" border size="small">
+          <el-table-column label="启用" width="70" align="center">
+            <template #default="scope">
+              <el-switch v-model="scope.row.enabled" />
+            </template>
+          </el-table-column>
+          <el-table-column label="因子" width="150">
+            <template #default="scope">
+              <div class="factor-name">{{ getFactorMeta(scope.row.code).name }}</div>
+              <div class="factor-code">{{ scope.row.code }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="权重" width="150" align="center">
+            <template #default="scope">
+              <el-input-number
+                v-model="scope.row.weight"
+                :min="-1"
+                :max="1"
+                :step="0.1"
+                size="small"
+                controls-position="right"
+              />
+            </template>
+          </el-table-column>
+        </el-table>
       </el-form>
 
       <template #footer>
@@ -124,6 +175,137 @@ import { ElMessage } from 'element-plus'
 const ALL_STOCK_SENTINEL = '__ALL__'
 const ALL_STOCK_LABEL = '全部股票'
 
+const BUILTIN_FACTORS = [
+  { code: 'mom_20', name: '20日动量', description: '近20个交易日收益率，偏中期趋势', weight: 0.45, enabled: true },
+  { code: 'rev_5', name: '5日反转', description: '近5个交易日收益率取反，短期回调加分', weight: 0.1, enabled: true },
+  { code: 'vol_20', name: '20日低波动', description: '近20个交易日收益波动率取反，波动越小越好', weight: 0.2, enabled: true },
+  { code: 'trend_20', name: '20日均线趋势', description: '收盘价相对20日均线的偏离，强于均线加分', weight: 0.25, enabled: true }
+]
+
+const factorMetaMap = Object.fromEntries(BUILTIN_FACTORS.map(item => [item.code, item]))
+const createDefaultFactors = () => BUILTIN_FACTORS.map(item => ({
+  code: item.code,
+  weight: item.weight,
+  enabled: item.enabled
+}))
+
+const STRATEGY_PRESETS = [
+  {
+    code: 'balanced',
+    name: '均衡默认组合',
+    config: {
+      top_n: 5,
+      buy_threshold: 0.3,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.45, enabled: true },
+        { code: 'rev_5', weight: 0.1, enabled: true },
+        { code: 'vol_20', weight: 0.2, enabled: true },
+        { code: 'trend_20', weight: 0.25, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'aggressive',
+    name: '高收益进攻组合',
+    config: {
+      top_n: 3,
+      buy_threshold: 0.1,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.6, enabled: true },
+        { code: 'rev_5', weight: 0.05, enabled: true },
+        { code: 'vol_20', weight: 0.05, enabled: true },
+        { code: 'trend_20', weight: 0.3, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'low_drawdown',
+    name: '低回撤防守组合',
+    config: {
+      top_n: 8,
+      buy_threshold: 0.5,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.2, enabled: true },
+        { code: 'rev_5', weight: 0.1, enabled: true },
+        { code: 'vol_20', weight: 0.5, enabled: true },
+        { code: 'trend_20', weight: 0.2, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'low_turnover',
+    name: '稳健分散组合',
+    config: {
+      top_n: 6,
+      buy_threshold: 0.25,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.4, enabled: true },
+        { code: 'rev_5', weight: 0.05, enabled: true },
+        { code: 'vol_20', weight: 0.25, enabled: true },
+        { code: 'trend_20', weight: 0.3, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'trend',
+    name: '中期趋势组合',
+    config: {
+      top_n: 5,
+      buy_threshold: 0.2,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.6, enabled: true },
+        { code: 'rev_5', weight: 0, enabled: false },
+        { code: 'vol_20', weight: 0.1, enabled: true },
+        { code: 'trend_20', weight: 0.3, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'pullback',
+    name: '短期回调修复组合',
+    config: {
+      top_n: 5,
+      buy_threshold: 0.1,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.3, enabled: true },
+        { code: 'rev_5', weight: 0.4, enabled: true },
+        { code: 'vol_20', weight: 0.1, enabled: true },
+        { code: 'trend_20', weight: 0.2, enabled: true }
+      ]
+    }
+  },
+  {
+    code: 'strict_cash',
+    name: '空仓择时严格组合',
+    config: {
+      top_n: 5,
+      buy_threshold: 0.8,
+      allow_cash: true,
+      factors: [
+        { code: 'mom_20', weight: 0.45, enabled: true },
+        { code: 'rev_5', weight: 0.05, enabled: true },
+        { code: 'vol_20', weight: 0.25, enabled: true },
+        { code: 'trend_20', weight: 0.25, enabled: true }
+      ]
+    }
+  }
+]
+
+const normalizeFactors = (factors = []) => {
+  const savedMap = Object.fromEntries((factors || []).map(item => [item.code, item]))
+  return BUILTIN_FACTORS.map(item => ({
+    code: item.code,
+    weight: Number(savedMap[item.code]?.weight ?? item.weight),
+    enabled: Boolean(savedMap[item.code]?.enabled ?? item.enabled)
+  }))
+}
+
 const strategies = ref([])
 const loading = ref(false)
 const saving = ref(false)
@@ -131,12 +313,16 @@ const dialogVisible = ref(false)
 
 const createDefaultStrategy = () => ({
   id: null,
+  preset_code: 'balanced',
   name: '新建多因子策略',
   stock_pool: '',
   use_all_stocks: false,
-  weight_mom: 0.5,
-  weight_bias: -0.5,
-  top_n: 2
+  top_n: 5,
+  buy_threshold: 0.3,
+  allow_cash: true,
+  fee_rate: 0.0001,
+  min_fee: 0,
+  factors: createDefaultFactors()
 })
 
 const currentStrategy = ref(createDefaultStrategy())
@@ -148,12 +334,55 @@ const getApi = () => {
   })
 }
 
+const normalizeConfig = (config = {}) => ({
+  preset_code: config.preset_code || 'balanced',
+  top_n: Number(config.top_n ?? 5),
+  buy_threshold: Number(config.buy_threshold ?? 0.3),
+  allow_cash: config.allow_cash ?? true,
+  fee_rate: 0.0001,
+  min_fee: 0,
+  factors: normalizeFactors(config.factors)
+})
+
 const parseConfig = (codeStr) => {
   try {
-    return JSON.parse(codeStr)
+    return normalizeConfig(JSON.parse(codeStr))
   } catch (e) {
-    return { weight_mom: 0, weight_bias: 0, top_n: 0 }
+    return normalizeConfig()
   }
+}
+
+const getFactorMeta = (code) => factorMetaMap[code] || { name: code, description: '' }
+const enabledFactorCount = (factors = []) => factors.filter(item => item.enabled && Number(item.weight) !== 0).length
+
+const buildStrategyConfig = () => ({
+  preset_code: currentStrategy.value.preset_code,
+  top_n: currentStrategy.value.top_n,
+  buy_threshold: currentStrategy.value.buy_threshold,
+  allow_cash: currentStrategy.value.allow_cash,
+  fee_rate: 0.0001,
+  min_fee: 0,
+  factors: currentStrategy.value.factors.map(item => ({
+    code: item.code,
+    weight: Number(item.weight),
+    enabled: Boolean(item.enabled)
+  }))
+})
+
+const applyConfigToCurrentStrategy = (config) => {
+  currentStrategy.value.top_n = config.top_n
+  currentStrategy.value.buy_threshold = config.buy_threshold
+  currentStrategy.value.allow_cash = config.allow_cash
+  currentStrategy.value.fee_rate = 0.0001
+  currentStrategy.value.min_fee = 0
+  currentStrategy.value.factors = normalizeFactors(config.factors)
+}
+
+const applyStrategyPreset = (presetCode) => {
+  const preset = STRATEGY_PRESETS.find(item => item.code === presetCode)
+  if (!preset) return
+  currentStrategy.value.preset_code = presetCode
+  applyConfigToCurrentStrategy(preset.config)
 }
 
 const isAllStockPool = (value = '') => {
@@ -232,11 +461,15 @@ const openDialog = (row = null) => {
     currentStrategy.value = {
       id: row.id,
       name: row.name,
+      preset_code: config.preset_code,
       stock_pool: useAllStocks ? '' : normalizedPool,
       use_all_stocks: useAllStocks,
-      weight_mom: config.weight_mom ?? 0.5,
-      weight_bias: config.weight_bias ?? -0.5,
-      top_n: config.top_n ?? 2
+      top_n: config.top_n,
+      buy_threshold: config.buy_threshold,
+      allow_cash: config.allow_cash,
+      fee_rate: config.fee_rate,
+      min_fee: config.min_fee,
+      factors: normalizeFactors(config.factors)
     }
   } else {
     currentStrategy.value = createDefaultStrategy()
@@ -267,11 +500,7 @@ const saveStrategy = async () => {
   const payload = {
     name,
     stock_pool: finalStockPool,
-    code: JSON.stringify({
-      weight_mom: currentStrategy.value.weight_mom,
-      weight_bias: currentStrategy.value.weight_bias,
-      top_n: currentStrategy.value.top_n
-    })
+    code: JSON.stringify(buildStrategyConfig())
   }
 
   if (currentStrategy.value.id) {
@@ -332,5 +561,23 @@ onMounted(() => {
   font-size: 12px;
   color: #909399;
   line-height: 1.5;
+}
+
+.factor-name {
+  font-weight: 600;
+  color: #303133;
+}
+
+.factor-code {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+  font-family: 'Roboto Mono', monospace;
+}
+
+.fee-text {
+  color: #606266;
+  font-size: 13px;
+  line-height: 32px;
 }
 </style>

@@ -9,6 +9,7 @@ from backtest.models import BacktestTask, BacktestResult
 from backtest.engine import SparkBacktestEngine
 # 🟢 引入基础信息模型，用于映射名称
 from stocks.models import StockBasicInfo
+from trade.factor_config import normalize_strategy_config
 
 User = get_user_model()
 
@@ -23,10 +24,7 @@ class RunBacktestView(APIView):
             start_date = data.get('start_date', '2025-01-01')
             end_date = data.get('end_date', '2025-12-31')
             initial_capital = float(data.get('initial_capital', 100000.0))
-
-            weight_mom = float(data.get('weight_mom', 0.5))
-            weight_bias = float(data.get('weight_bias', 0.5))
-            top_n = int(data.get('top_n', 2))
+            strategy_config = normalize_strategy_config(data)
 
             user = User.objects.first()
             if not user:
@@ -38,14 +36,14 @@ class RunBacktestView(APIView):
                 start_date=start_date,
                 end_date=end_date,
                 initial_capital=initial_capital,
-                factor_weights={"momentum": weight_mom, "bias": weight_bias, "top_n": top_n},
+                factor_weights=strategy_config,
                 status='running'
             )
 
             engine = SparkBacktestEngine(task_id=task.id)
             sdf = engine.load_data(start_date, end_date)
-            factor_sdf = engine.compute_multi_factors(sdf, weight_mom=weight_mom, weight_bias=weight_bias)
-            portfolio_df = engine.simulate_strategy(factor_sdf, top_n=top_n)
+            factor_sdf = engine.compute_multi_factors(sdf, config=strategy_config)
+            portfolio_df = engine.simulate_strategy(factor_sdf, config=strategy_config)
             engine.stop()
 
             if portfolio_df.empty:
@@ -56,7 +54,10 @@ class RunBacktestView(APIView):
 
             # 计算累计总收益率
             total_return = final_equity_ratio - 1
-            annualized_return = total_return * (252 / days) if days > 0 else 0
+            annualized_return = (final_equity_ratio ** (252 / days) - 1) if days > 0 else 0
+            avg_turnover = float(portfolio_df['turnover'].mean()) if 'turnover' in portfolio_df else 0.0
+            total_turnover = float(portfolio_df['turnover'].sum()) if 'turnover' in portfolio_df else 0.0
+            cash_days = int((portfolio_df['holdings_count'] == 0).sum()) if 'holdings_count' in portfolio_df else 0
 
             equity_curve = []
             trade_records = []
@@ -91,14 +92,18 @@ class RunBacktestView(APIView):
                 equity_curve.append({
                     "date": row['date'],
                     "equity": current_equity,
-                    "daily_return": daily_ret
+                    "daily_return": daily_ret,
+                    "turnover": round(float(row.get('turnover', 0.0)), 4),
+                    "holdings_count": int(row.get('holdings_count', 0))
                 })
 
                 trade_records.append({
                     "date": row['date'],
                     "stocks": stocks_str,
                     "daily_return": daily_ret,
-                    "equity": current_equity
+                    "equity": current_equity,
+                    "turnover": round(float(row.get('turnover', 0.0)), 4),
+                    "holdings_count": int(row.get('holdings_count', 0))
                 })
 
             BacktestResult.objects.create(
@@ -118,6 +123,10 @@ class RunBacktestView(APIView):
                     "total_return": round(total_return, 4),
                     "annualized_return": round(annualized_return, 4),
                     "final_capital": equity_curve[-1]['equity'],
+                    "avg_turnover": round(avg_turnover, 4),
+                    "total_turnover": round(total_turnover, 4),
+                    "cash_days": cash_days,
+                    "strategy_config": strategy_config,
                     "equity_curve": equity_curve,
                     "trade_records": trade_records
                 }
