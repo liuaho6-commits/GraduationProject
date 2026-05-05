@@ -155,7 +155,6 @@ def get_stock_data_api(request, stock_code):
 
 @api_view(['GET'])
 def get_market_list_api(request):
-    # 保持原样，不需要修改
     mock_now = get_mock_now()
     if timezone.is_aware(mock_now):
         mock_naive = timezone.make_naive(mock_now)
@@ -163,23 +162,32 @@ def get_market_list_api(request):
         mock_naive = mock_now
 
     mock_today = mock_naive.date()
-    stocks = StockBasicInfo.objects.all()
-    full_data = []
-
-    # ... 省略中间代码，避免字数过多，这部分并未修改 ...
-    # 如果你需要我完整贴出 get_market_list_api 也可以，但它和K线展示无关
-    # 为了安全起见，建议你只替换上面的 get_stock_data_api 函数
-
-    # 这里简单把 get_market_list_api 的核心逻辑复述一遍，防止你覆盖时丢失
-    # (实际上你只需要把上面的 get_stock_data_api 替换掉原本的即可)
-
-    # ... (以下为原本的 get_market_list_api 逻辑) ...
     date_1w = mock_today - datetime.timedelta(days=7)
     date_1y = mock_today - datetime.timedelta(days=365)
     date_2y = mock_today - datetime.timedelta(days=365 * 2)
     date_3y = mock_today - datetime.timedelta(days=365 * 3)
 
-    for stock in stocks:
+    sort_prop = request.GET.get('sort_prop') or 'code'
+    sort_order = request.GET.get('sort_order') or 'ascending'
+    reverse = (sort_order == 'descending')
+
+    db_sort_fields = {'code': 'code', 'name': 'name'}
+    order_field = db_sort_fields.get(sort_prop, 'code')
+    if reverse:
+        order_field = f'-{order_field}'
+
+    stocks = StockBasicInfo.objects.all().order_by(order_field)
+
+    paginator = StandardResultsSetPagination()
+    page_stocks = paginator.paginate_queryset(stocks, request)
+
+    def calc_change(now, ref):
+        if now and ref and ref > 0:
+            return round((now - ref) / ref * 100, 2)
+        return 0.0
+
+    page_data = []
+    for stock in page_stocks:
         candidates = StockMinuteData.objects.filter(
             code=stock.code,
             date__lte=mock_now + datetime.timedelta(days=1)
@@ -215,12 +223,7 @@ def get_market_list_api(request):
         price_2y = get_historical_close(stock.code, date_2y)
         price_3y = get_historical_close(stock.code, date_3y)
 
-        def calc_change(now, ref):
-            if now and ref and ref > 0:
-                return round((now - ref) / ref * 100, 2)
-            return 0.0
-
-        full_data.append({
+        page_data.append({
             'code': stock.code,
             'name': stock.name,
             'price': price,
@@ -233,14 +236,7 @@ def get_market_list_api(request):
             'change_3y': calc_change(price, price_3y),
         })
 
-    sort_prop = request.GET.get('sort_prop', 'code')
-    sort_order = request.GET.get('sort_order', 'ascending')
-
-    if full_data and sort_prop in full_data[0]:
-        reverse = (sort_order == 'descending')
-        full_data.sort(key=lambda x: x.get(sort_prop) or 0, reverse=reverse)
-
-    paginator = StandardResultsSetPagination()
-    page_data = paginator.paginate_queryset(full_data, request)
+    if page_data and sort_prop not in db_sort_fields and sort_prop in page_data[0]:
+        page_data.sort(key=lambda x: x.get(sort_prop) or 0, reverse=reverse)
 
     return paginator.get_paginated_response(page_data)
