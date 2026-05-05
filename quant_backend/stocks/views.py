@@ -3,12 +3,26 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 import datetime
-from .models import StockData, StockMinuteData, StockBasicInfo
-from .serializers import StockDataSerializer, StockMinuteDataSerializer
+from .models import (
+    MarketIndexBasicInfo,
+    MarketIndexDailyData,
+    MarketIndexMinuteData,
+    StockData,
+    StockMinuteData,
+    StockBasicInfo,
+)
+from .serializers import (
+    MarketIndexDailyDataSerializer,
+    MarketIndexMinuteDataSerializer,
+    StockDataSerializer,
+    StockMinuteDataSerializer,
+)
 from trade.time_utils import get_mock_now
 import warnings
 # 忽略 Django 关于 Naive datetime 的时区警告
 warnings.filterwarnings('ignore', category=RuntimeWarning, message=r'.*received a naive datetime.*')
+
+INDEX_ORDER = ['sh.000001', 'sz.399001', 'sz.399006', 'sh.000300']
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -28,6 +42,106 @@ def get_historical_close(code, target_date):
     obj = StockData.objects.filter(code=code, date__lte=target_time).order_by('-date').first()
     if obj: return obj.close
     return None
+
+
+def calc_change(now, ref):
+    if now and ref and ref > 0:
+        return round((now - ref) / ref * 100, 2)
+    return 0.0
+
+
+def parse_limit(request, default=500, max_value=5000):
+    try:
+        limit = int(request.GET.get('limit', default))
+    except (TypeError, ValueError):
+        limit = default
+    return max(1, min(limit, max_value))
+
+
+@api_view(['GET'])
+def get_market_index_list_api(request):
+    """
+    获取大盘指数概览卡片数据。
+    """
+    index_info = list(MarketIndexBasicInfo.objects.all())
+    index_info.sort(key=lambda item: INDEX_ORDER.index(item.code) if item.code in INDEX_ORDER else 99)
+
+    data = []
+    for info in index_info:
+        latest = MarketIndexDailyData.objects.filter(code=info.code).order_by('-date').first()
+        if not latest:
+            data.append({
+                'code': info.code,
+                'name': info.name,
+                'market': info.market,
+                'price': 0,
+                'change': 0,
+                'change_amount': 0,
+                'date': None,
+                'volume': 0,
+                'amount': 0,
+            })
+            continue
+
+        prev = MarketIndexDailyData.objects.filter(code=info.code, date__lt=latest.date).order_by('-date').first()
+        change = latest.change_pct
+        if change is None:
+            change = calc_change(latest.close, prev.close if prev else None)
+
+        data.append({
+            'code': info.code,
+            'name': info.name,
+            'market': info.market,
+            'price': latest.close,
+            'change': round(change or 0, 2),
+            'change_amount': latest.change_amount if latest.change_amount is not None else (
+                round(latest.close - prev.close, 2) if prev else 0
+            ),
+            'date': latest.date.strftime('%Y-%m-%d'),
+            'volume': latest.volume,
+            'amount': latest.amount or 0,
+        })
+
+    return Response({
+        'code': 200,
+        'data': data,
+    })
+
+
+@api_view(['GET'])
+def get_market_index_data_api(request, index_code):
+    """
+    获取大盘指数 K 线数据。freq=daily 返回日线，freq=min/5min 返回 5 分钟线。
+    """
+    info = MarketIndexBasicInfo.objects.filter(code=index_code).first()
+    name = info.name if info else '未知指数'
+    freq = request.GET.get('freq', 'daily')
+    limit = parse_limit(request, default=1200 if freq == 'daily' else 500)
+
+    if freq in ['min', '5min']:
+        queryset = MarketIndexMinuteData.objects.filter(code=index_code).order_by('-date')[:limit]
+        final_data_list = list(reversed(list(queryset)))
+        serializer_cls = MarketIndexMinuteDataSerializer
+    else:
+        queryset = MarketIndexDailyData.objects.filter(code=index_code).order_by('-date')[:limit]
+        final_data_list = list(reversed(list(queryset)))
+        serializer_cls = MarketIndexDailyDataSerializer
+        freq = 'daily'
+
+    latest = final_data_list[-1] if final_data_list else None
+    serializer = serializer_cls(final_data_list, many=True)
+
+    return Response({
+        'code': 200,
+        'name': name,
+        'index_code': index_code,
+        'freq': freq,
+        'latest_price': latest.close if latest else 0,
+        'latest_time': latest.date.strftime('%Y-%m-%d %H:%M:%S') if latest and hasattr(latest.date, 'hour') else (
+            latest.date.strftime('%Y-%m-%d') if latest else ''
+        ),
+        'data': serializer.data,
+    })
 
 
 @api_view(['GET'])
@@ -214,11 +328,6 @@ def get_market_list_api(request):
         price_1y = get_historical_close(stock.code, date_1y)
         price_2y = get_historical_close(stock.code, date_2y)
         price_3y = get_historical_close(stock.code, date_3y)
-
-        def calc_change(now, ref):
-            if now and ref and ref > 0:
-                return round((now - ref) / ref * 100, 2)
-            return 0.0
 
         full_data.append({
             'code': stock.code,

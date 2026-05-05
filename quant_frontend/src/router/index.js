@@ -3,6 +3,7 @@ import LoginView from '../views/LoginView.vue'
 import RegisterView from '../views/RegisterView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import MarketView from '../views/MarketView.vue'
+import MarketIndexDetailView from '../views/MarketIndexDetailView.vue'
 import StockDetailView from '../views/StockDetailView.vue' // 🟢 引入详情页
 import MainLayout from '../layout/MainLayout.vue'
 import BacktestView from '../views/BacktestView.vue' // 🟢 1. 引入新页面
@@ -33,6 +34,11 @@ const router = createRouter({
           path: 'market',
           name: 'market',
           component: MarketView
+        },
+        {
+          path: 'index/:code',
+          name: 'market-index-detail',
+          component: MarketIndexDetailView
         },
         // 🟢 新增路由：K线详情页
         {

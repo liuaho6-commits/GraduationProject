@@ -1,5 +1,7 @@
 <template>
   <div class="market-container">
+    <MarketIndexBoard />
+
     <el-card shadow="never" class="main-card">
       <template #header>
         <MarketHeader
@@ -32,6 +34,7 @@ import { ElMessage } from 'element-plus'
 
 // 引入子组件
 import MarketHeader from '../components/MarketHeader.vue'
+import MarketIndexBoard from '../components/MarketIndexBoard.vue'
 import StockTable from '../components/StockTable.vue'
 
 const token = localStorage.getItem('token')
