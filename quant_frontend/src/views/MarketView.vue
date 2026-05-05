@@ -49,8 +49,6 @@ const total = ref(0)
 const currentPage = ref(1)
 const favoriteCodes = ref(new Set()) // 使用 Set 来快速判断是否收藏
 let refreshTimer = null
-let tableRequestSeq = 0
-let loadingRequestSeq = 0
 
 // 排序状态
 const sortProp = ref('')
@@ -59,11 +57,7 @@ const sortOrder = ref('')
 // --- 核心数据获取逻辑 ---
 
 const fetchMarketData = async (page = 1, forceRefresh = false, silent = false) => {
-  const requestSeq = ++tableRequestSeq
-  if (!silent) {
-    loadingRequestSeq = requestSeq
-    loading.value = true
-  }
+  if (!silent) loading.value = true
 
   try {
     let url = `stocks/api/market/?page=${page}`
@@ -75,8 +69,6 @@ const fetchMarketData = async (page = 1, forceRefresh = false, silent = false) =
     }
 
     const res = await api.get(url)
-    if (activeTab.value !== 'all' || requestSeq !== tableRequestSeq) return
-
     tableData.value = res.data.results
     total.value = res.data.count
     currentPage.value = page
@@ -90,38 +82,17 @@ const fetchMarketData = async (page = 1, forceRefresh = false, silent = false) =
       await fetchFavoritesList(false)
     }
 
-    if (forceRefresh && requestSeq === tableRequestSeq) ElMessage.success('已刷新')
+    if (forceRefresh) ElMessage.success('已刷新')
   } catch (err) {
-    if (!silent && loadingRequestSeq === requestSeq) ElMessage.error('获取失败')
+    if (!silent) ElMessage.error('获取失败')
     console.error(err)
   } finally {
-    if (!silent && loadingRequestSeq === requestSeq) loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
-const sortRows = (rows) => {
-  if (!sortProp.value || !sortOrder.value) return rows
-
-  const direction = sortOrder.value === 'descending' ? -1 : 1
-  return [...rows].sort((a, b) => {
-    const aVal = a[sortProp.value]
-    const bVal = b[sortProp.value]
-
-    if (typeof aVal === 'number' && typeof bVal === 'number') {
-      return (aVal - bVal) * direction
-    }
-
-    return String(aVal ?? '').localeCompare(String(bVal ?? ''), 'zh-CN') * direction
-  })
-}
-
-const fetchFavoritesList = async (updateTable = true, silent = false) => {
-  const requestSeq = updateTable ? ++tableRequestSeq : tableRequestSeq
-  if (updateTable && !silent) {
-    loadingRequestSeq = requestSeq
-    loading.value = true
-  }
-
+const fetchFavoritesList = async (updateTable = true) => {
+  if (updateTable) loading.value = true
   try {
     const res = await api.get('api/users/favorites/')
     const list = res.data.data
@@ -130,57 +101,45 @@ const fetchFavoritesList = async (updateTable = true, silent = false) => {
 
     // 如果当前在看自选股 Tab，直接用这个数据渲染表格
     if (updateTable) {
-      if (activeTab.value !== 'favorites' || requestSeq !== tableRequestSeq) return
-
-      const rows = list.map(item => ({
+      tableData.value = list.map(item => ({
         code: item.stock,
         name: item.name,
         price: item.price,
         date: item.add_time,
         change: item.change
       }))
-
-      tableData.value = sortRows(rows)
-      total.value = rows.length
-      currentPage.value = 1
     }
   } catch (err) {
     console.error(err)
   } finally {
-    if (updateTable && !silent && loadingRequestSeq === requestSeq) loading.value = false
+    if (updateTable) loading.value = false
   }
 }
 
 // --- 事件处理 ---
 
 const handleSortChange = ({ prop, order }) => {
-  sortProp.value = prop || ''
-  sortOrder.value = order || ''
-
-  if (activeTab.value === 'all') {
-    fetchMarketData(1, false, false)
-  } else {
-    tableData.value = sortRows(tableData.value)
-  }
+  sortProp.value = prop
+  sortOrder.value = order
+  fetchMarketData(1, false, false)
 }
 
 const handleManualRefresh = () => {
   if (activeTab.value === 'all') {
     fetchMarketData(currentPage.value, true, false)
   } else {
-    fetchFavoritesList(true, false)
+    fetchFavoritesList(true)
   }
 }
 
 const handlePageChange = (val) => fetchMarketData(val, false, false)
 
 const handleTabChange = (tab) => {
-  activeTab.value = tab
   // 切换 tab 时重置排序或页码逻辑可视需求而定
   if (tab === 'all') {
     fetchMarketData(1, false, false)
   } else {
-    fetchFavoritesList(true, false)
+    fetchFavoritesList(true)
   }
 }
 
@@ -191,19 +150,16 @@ const toggleFavorite = async (row) => {
       // 取消收藏
       await api.delete('api/users/favorites/', { data: { code } })
       ElMessage.info(`取消关注 ${code}`)
-      const nextFavorites = new Set(favoriteCodes.value)
-      nextFavorites.delete(code)
-      favoriteCodes.value = nextFavorites
+      favoriteCodes.value.delete(code)
       // 如果在自选股列表，直接移除该行
       if (activeTab.value === 'favorites') {
         tableData.value = tableData.value.filter(item => item.code !== code)
-        total.value = tableData.value.length
       }
     } else {
       // 添加收藏
       await api.post('api/users/favorites/', { code })
       ElMessage.success(`关注 ${code}`)
-      favoriteCodes.value = new Set([...favoriteCodes.value, code])
+      favoriteCodes.value.add(code)
     }
   } catch (err) {
     ElMessage.error('操作失败')
@@ -217,12 +173,8 @@ onMounted(() => {
 
   // 自动轮询
   refreshTimer = setInterval(() => {
-    if (loading.value) return
-
     if (activeTab.value === 'all') {
       fetchMarketData(currentPage.value, false, true) // silent refresh
-    } else {
-      fetchFavoritesList(true, true) // silent refresh
     }
   }, 3000)
 })
